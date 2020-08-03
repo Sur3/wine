@@ -148,18 +148,12 @@ static HANDLE normalize_handle_if_console( HANDLE handle )
 HANDLE WINAPI DECLSPEC_HOTPATCH RegisterWaitForSingleObjectEx( HANDLE handle, WAITORTIMERCALLBACK callback,
                                                                PVOID context, ULONG timeout, ULONG flags )
 {
-    NTSTATUS status;
     HANDLE ret;
 
     TRACE( "%p %p %p %d %d\n", handle, callback, context, timeout, flags );
 
     handle = normalize_handle_if_console( handle );
-    status = RtlRegisterWait( &ret, handle, callback, context, timeout, flags );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return NULL;
-    }
+    if (!set_ntstatus( RtlRegisterWait( &ret, handle, callback, context, timeout, flags ))) return NULL;
     return ret;
 }
 
@@ -388,18 +382,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenEventW( DWORD access, BOOL inherit, LPCWSTR 
     HANDLE ret;
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
-    NTSTATUS status;
 
     if (!is_version_nt()) access = EVENT_ALL_ACCESS;
 
     if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
 
-    status = NtOpenEvent( &ret, access, &attr );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return 0;
-    }
+    if (!set_ntstatus( NtOpenEvent( &ret, access, &attr ))) return 0;
     return ret;
 }
 
@@ -505,18 +493,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenMutexW( DWORD access, BOOL inherit, LPCWSTR 
     HANDLE ret;
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
-    NTSTATUS status;
 
     if (!is_version_nt()) access = MUTEX_ALL_ACCESS;
 
     if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
 
-    status = NtOpenMutant( &ret, access, &attr );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return 0;
-    }
+    if (!set_ntstatus( NtOpenMutant( &ret, access, &attr ))) return 0;
     return ret;
 }
 
@@ -575,18 +557,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenSemaphoreW( DWORD access, BOOL inherit, LPCW
     HANDLE ret;
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
-    NTSTATUS status;
 
     if (!is_version_nt()) access = SEMAPHORE_ALL_ACCESS;
 
     if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
 
-    status = NtOpenSemaphore( &ret, access, &attr );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return 0;
-    }
+    if (!set_ntstatus( NtOpenSemaphore( &ret, access, &attr ))) return 0;
     return ret;
 }
 
@@ -646,18 +622,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenWaitableTimerW( DWORD access, BOOL inherit, 
     HANDLE handle;
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
-    NTSTATUS status;
 
     if (!is_version_nt()) access = TIMER_ALL_ACCESS;
 
     if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
 
-    status = NtOpenTimer( &handle, access, &attr );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return 0;
-    }
+    if (!set_ntstatus( NtOpenTimer( &handle, access, &attr ))) return 0;
     return handle;
 }
 
@@ -709,13 +679,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CancelWaitableTimer( HANDLE handle )
 HANDLE WINAPI DECLSPEC_HOTPATCH CreateTimerQueue(void)
 {
     HANDLE q;
-    NTSTATUS status = RtlCreateTimerQueue( &q );
 
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError( status ));
-        return NULL;
-    }
+    if (!set_ntstatus( RtlCreateTimerQueue( &q ))) return NULL;
     return q;
 }
 
@@ -864,7 +829,6 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenFileMappingW( DWORD access, BOOL inherit, LP
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING nameW;
     HANDLE ret;
-    NTSTATUS status;
 
     if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
 
@@ -876,12 +840,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenFileMappingW( DWORD access, BOOL inherit, LP
         if (!NtOpenSection( &ret, access | SECTION_MAP_READ | SECTION_MAP_WRITE, &attr )) return ret;
     }
 
-    status = NtOpenSection( &ret, access, &attr );
-    if (status != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return 0;
-    }
+    if (!set_ntstatus( NtOpenSection( &ret, access, &attr ))) return 0;
     return ret;
 }
 
@@ -929,18 +888,14 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateIoCompletionPort( HANDLE handle, HANDLE po
 {
     FILE_COMPLETION_INFORMATION info;
     IO_STATUS_BLOCK iosb;
-    NTSTATUS status;
     HANDLE ret = port;
 
     TRACE( "(%p, %p, %08lx, %08x)\n", handle, port, key, threads );
 
     if (!port)
     {
-        if ((status = NtCreateIoCompletion( &ret, IO_COMPLETION_ALL_ACCESS, NULL, threads )))
-        {
-            SetLastError( RtlNtStatusToDosError(status) );
+        if (!set_ntstatus( NtCreateIoCompletion( &ret, IO_COMPLETION_ALL_ACCESS, NULL, threads )))
             return 0;
-        }
     }
     else if (handle == INVALID_HANDLE_VALUE)
     {
@@ -952,10 +907,9 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateIoCompletionPort( HANDLE handle, HANDLE po
     {
         info.CompletionPort = ret;
         info.CompletionKey = key;
-        if ((status = NtSetInformationFile( handle, &iosb, &info, sizeof(info), FileCompletionInformation )))
+        if (!set_ntstatus( NtSetInformationFile( handle, &iosb, &info, sizeof(info), FileCompletionInformation )))
         {
             if (!port) CloseHandle( ret );
-            SetLastError( RtlNtStatusToDosError(status) );
             return 0;
         }
     }
@@ -1163,12 +1117,58 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateNamedPipeW( LPCWSTR name, DWORD open_mode,
                                     FILE_OVERWRITE_IF, options, pipe_type,
                                     read_mode, non_block, instances, in_buff, out_buff, &time );
     RtlFreeUnicodeString( &nt_name );
-    if (status)
-    {
-        handle = INVALID_HANDLE_VALUE;
-        SetLastError( RtlNtStatusToDosError(status) );
-    }
+    if (!set_ntstatus( status )) return INVALID_HANDLE_VALUE;
     return handle;
+}
+
+
+/******************************************************************
+ *           CreatePipe   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH CreatePipe( HANDLE *read_pipe, HANDLE *write_pipe,
+                                          SECURITY_ATTRIBUTES *sa, DWORD size )
+{
+    static unsigned int index;
+    WCHAR name[64];
+    UNICODE_STRING nt_name;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK iosb;
+    LARGE_INTEGER timeout;
+
+    *read_pipe = *write_pipe = INVALID_HANDLE_VALUE;
+
+    attr.Length             = sizeof(attr);
+    attr.RootDirectory      = 0;
+    attr.ObjectName         = &nt_name;
+    attr.Attributes         = OBJ_CASE_INSENSITIVE | ((sa && sa->bInheritHandle) ? OBJ_INHERIT : 0);
+    attr.SecurityDescriptor = sa ? sa->lpSecurityDescriptor : NULL;
+    attr.SecurityQualityOfService = NULL;
+
+    if (!size) size = 4096;
+
+    timeout.QuadPart = (ULONGLONG)NMPWAIT_USE_DEFAULT_WAIT * -10000;
+
+    /* generate a unique pipe name (system wide) */
+    for (;;)
+    {
+        static const WCHAR fmtW[] = { '\\','?','?','\\','p','i','p','e','\\',
+           'W','i','n','3','2','.','P','i','p','e','s','.','%','0','8','l','u','.','%','0','8','u','\0' };
+
+        swprintf( name, ARRAY_SIZE(name), fmtW, GetCurrentProcessId(), ++index );
+        RtlInitUnicodeString( &nt_name, name );
+        if (!NtCreateNamedPipeFile( read_pipe, GENERIC_READ | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+                                    &attr, &iosb, FILE_SHARE_WRITE, FILE_OVERWRITE_IF,
+                                    FILE_SYNCHRONOUS_IO_NONALERT,
+                                    FALSE, FALSE, FALSE, 1, size, size, &timeout ))
+            break;
+    }
+    if (!set_ntstatus( NtOpenFile( write_pipe, GENERIC_WRITE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr,
+                                   &iosb, 0, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE )))
+    {
+        NtClose( *read_pipe );
+        return FALSE;
+    }
+    return TRUE;
 }
 
 
@@ -1193,14 +1193,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetNamedPipeInfo( HANDLE pipe, LPDWORD flags, LPDW
 {
     FILE_PIPE_LOCAL_INFORMATION info;
     IO_STATUS_BLOCK iosb;
-    NTSTATUS status;
 
-    status = NtQueryInformationFile( pipe, &iosb, &info, sizeof(info), FilePipeLocalInformation );
-    if (status)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
+    if (!set_ntstatus( NtQueryInformationFile( pipe, &iosb, &info, sizeof(info), FilePipeLocalInformation )))
         return FALSE;
-    }
+
     if (flags)
     {
         *flags = (info.NamedPipeEnd & FILE_PIPE_SERVER_END) ? PIPE_SERVER_END : PIPE_CLIENT_END;
@@ -1383,3 +1379,93 @@ BOOL WINAPI DECLSPEC_HOTPATCH WaitNamedPipeW( LPCWSTR name, DWORD timeout )
     NtClose( pipe_dev );
     return set_ntstatus( status );
 }
+
+
+
+/***********************************************************************
+ * Interlocked functions
+ ***********************************************************************/
+
+
+/***********************************************************************
+ *           InitOnceBeginInitialize    (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH InitOnceBeginInitialize( INIT_ONCE *once, DWORD flags,
+                                                       BOOL *pending, void **context )
+{
+    NTSTATUS status = RtlRunOnceBeginInitialize( once, flags, context );
+    if (status >= 0) *pending = (status == STATUS_PENDING);
+    else SetLastError( RtlNtStatusToDosError(status) );
+    return status >= 0;
+}
+
+
+/***********************************************************************
+ *           InitOnceComplete    (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH InitOnceComplete( INIT_ONCE *once, DWORD flags, void *context )
+{
+    return set_ntstatus( RtlRunOnceComplete( once, flags, context ));
+}
+
+
+/***********************************************************************
+ *           InitOnceExecuteOnce    (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH InitOnceExecuteOnce( INIT_ONCE *once, PINIT_ONCE_FN func,
+                                                   void *param, void **context )
+{
+    return !RtlRunOnceExecuteOnce( once, (PRTL_RUN_ONCE_INIT_FN)func, param, context );
+}
+
+#ifdef __i386__
+
+/***********************************************************************
+ *	     InterlockedCompareExchange   (kernelbase.@)
+ */
+__ASM_STDCALL_FUNC(InterlockedCompareExchange, 12,
+                  "movl 12(%esp),%eax\n\t"
+                  "movl 8(%esp),%ecx\n\t"
+                  "movl 4(%esp),%edx\n\t"
+                  "lock; cmpxchgl %ecx,(%edx)\n\t"
+                  "ret $12")
+
+/***********************************************************************
+ *	     InterlockedExchange   (kernelbase.@)
+ */
+__ASM_STDCALL_FUNC(InterlockedExchange, 8,
+                  "movl 8(%esp),%eax\n\t"
+                  "movl 4(%esp),%edx\n\t"
+                  "lock; xchgl %eax,(%edx)\n\t"
+                  "ret $8")
+
+/***********************************************************************
+ *	     InterlockedExchangeAdd   (kernelbase.@)
+ */
+__ASM_STDCALL_FUNC(InterlockedExchangeAdd, 8,
+                  "movl 8(%esp),%eax\n\t"
+                  "movl 4(%esp),%edx\n\t"
+                  "lock; xaddl %eax,(%edx)\n\t"
+                  "ret $8")
+
+/***********************************************************************
+ *	     InterlockedIncrement   (kernelbase.@)
+ */
+__ASM_STDCALL_FUNC(InterlockedIncrement, 4,
+                  "movl 4(%esp),%edx\n\t"
+                  "movl $1,%eax\n\t"
+                  "lock; xaddl %eax,(%edx)\n\t"
+                  "incl %eax\n\t"
+                  "ret $4")
+
+/***********************************************************************
+ *	     InterlockedDecrement   (kernelbase.@)
+ */
+__ASM_STDCALL_FUNC(InterlockedDecrement, 4,
+                  "movl 4(%esp),%edx\n\t"
+                  "movl $-1,%eax\n\t"
+                  "lock; xaddl %eax,(%edx)\n\t"
+                  "decl %eax\n\t"
+                  "ret $4")
+
+#endif  /* __i386__ */

@@ -537,8 +537,6 @@ void wined3d_device_cleanup(struct wined3d_device *device)
         ERR("Something's still holding the recording stateblock.\n");
     device->recording = NULL;
 
-    state_cleanup(&device->state);
-
     for (i = 0; i < ARRAY_SIZE(device->multistate_funcs); ++i)
     {
         heap_free(device->multistate_funcs[i]);
@@ -1142,7 +1140,8 @@ void wined3d_device_uninit_3d(struct wined3d_device *device)
         wined3d_texture_decref(texture);
     }
 
-    state_unbind_resources(&device->state);
+    wined3d_cs_emit_reset_state(device->cs);
+    state_cleanup(&device->state);
     for (i = 0; i < device->adapter->d3d_info.limits.max_rt_count; ++i)
     {
         wined3d_device_set_rendertarget_view(device, i, NULL, FALSE);
@@ -4071,49 +4070,53 @@ HRESULT CDECL wined3d_device_get_display_mode(const struct wined3d_device *devic
     return wined3d_swapchain_get_display_mode(swapchain, mode, rotation);
 }
 
-HRESULT CDECL wined3d_device_begin_stateblock(struct wined3d_device *device)
+HRESULT CDECL wined3d_device_begin_stateblock(struct wined3d_device *device,
+        struct wined3d_stateblock **stateblock)
 {
-    struct wined3d_stateblock *stateblock;
+    struct wined3d_stateblock *object;
     HRESULT hr;
 
     TRACE("device %p.\n", device);
 
     if (device->recording)
-        return WINED3DERR_INVALIDCALL;
-
-    hr = wined3d_stateblock_create(device, WINED3D_SBT_RECORDED, &stateblock);
-    if (FAILED(hr))
-        return hr;
-
-    device->recording = stateblock;
-    device->update_stateblock_state = &stateblock->stateblock_state;
-
-    TRACE("Recording stateblock %p.\n", stateblock);
-
-    return WINED3D_OK;
-}
-
-HRESULT CDECL wined3d_device_end_stateblock(struct wined3d_device *device,
-        struct wined3d_stateblock **stateblock)
-{
-    struct wined3d_stateblock *object = device->recording;
-
-    TRACE("device %p, stateblock %p.\n", device, stateblock);
-
-    if (!device->recording)
     {
-        WARN("Not recording.\n");
         *stateblock = NULL;
         return WINED3DERR_INVALIDCALL;
     }
 
-    stateblock_init_contained_states(object);
+    hr = wined3d_stateblock_create(device, WINED3D_SBT_RECORDED, &object);
+    if (FAILED(hr))
+        return hr;
 
+    device->recording = object;
+    device->update_stateblock_state = &object->stateblock_state;
+    wined3d_stateblock_incref(object);
     *stateblock = object;
+
+    TRACE("Recording stateblock %p.\n", *stateblock);
+
+    return WINED3D_OK;
+}
+
+HRESULT CDECL wined3d_device_end_stateblock(struct wined3d_device *device)
+{
+    struct wined3d_stateblock *stateblock = device->recording;
+
+    TRACE("device %p.\n", device);
+
+    if (!device->recording)
+    {
+        WARN("Not recording.\n");
+        return WINED3DERR_INVALIDCALL;
+    }
+
+    stateblock_init_contained_states(stateblock);
+
+    wined3d_stateblock_decref(device->recording);
     device->recording = NULL;
     device->update_stateblock_state = &device->stateblock_state;
 
-    TRACE("Returning stateblock %p.\n", *stateblock);
+    TRACE("Ending stateblock %p.\n", stateblock);
 
     return WINED3D_OK;
 }

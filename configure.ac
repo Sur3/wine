@@ -159,7 +159,7 @@ case $host in
       host_cpu="i386"
       notice_platform="32-bit "
       AC_SUBST(TARGETFLAGS,"-m32")
-      PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-/usr/lib/i386-linux-gnu/pkgconfig:/usr/lib/pkgconfig}
+      PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-/usr/lib/i386-linux-gnu/pkgconfig:/usr/lib32/pkgconfig:/usr/lib/pkgconfig}
       export PKG_CONFIG_PATH
       enable_win16=${enable_win16:-yes}
       with_unwind=${with_unwind:-no}
@@ -1223,7 +1223,12 @@ then
                     [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <X11/Xlib.h>
 #include <X11/extensions/Xrandr.h>]], [[static typeof(XRRGetScreenResources) *f; if (f) return 0;]])],
                       [AC_DEFINE(HAVE_XRRGETSCREENRESOURCES, 1,
-                        [Define if Xrandr has the XRRGetScreenResources function])])],,[$X_LIBS $X_EXTRA_LIBS])])
+                        [Define if Xrandr has the XRRGetScreenResources function])])
+                     AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <X11/Xlib.h>
+#include <X11/extensions/Xrandr.h>]], [[static typeof(XRRGetProviderResources) *f; if (f) return 0;]])],
+                      [AC_DEFINE(HAVE_XRRGETPROVIDERRESOURCES, 1,
+                        [Define if Xrandr has the XRRGetProviderResources function])],
+                      [WINE_NOTICE([libxrandr ${notice_platform}development files too old, XRandR display device handler won't be supported.])])],,[$X_LIBS $X_EXTRA_LIBS])])
         fi
         WINE_NOTICE_WITH(xrandr,[test "x$ac_cv_lib_soname_Xrandr" = "x"],
                          [libxrandr ${notice_platform}development files not found, XRandr won't be supported.])
@@ -1694,32 +1699,32 @@ dnl **** Check for libuwind ****
 if test "x$with_unwind" != xno
 then
     WINE_PACKAGE_FLAGS(UNWIND,[libunwind],[-lunwind],,,
-       [AC_CACHE_CHECK([for unw_getcontext],wine_cv_have_unw_getcontext,
+       [AC_CACHE_CHECK([for unw_step],wine_cv_have_unw_step,
            [AC_LINK_IFELSE([AC_LANG_PROGRAM([[#define UNW_LOCAL_ONLY
 #include <libunwind.h>]],
-                [[unw_context_t context; unw_getcontext( &context );]])],
-                [wine_cv_have_unw_getcontext="yes"],[wine_cv_have_unw_getcontext="no"])])
-        if test "$wine_cv_have_unw_getcontext" = no -a -n "$UNWIND_LIBS"
+                [[unw_cursor_t cursor; unw_step( &cursor );]])],
+                [wine_cv_have_unw_step="yes"],[wine_cv_have_unw_step="no"])])
+        if test "$wine_cv_have_unw_step" = no -a -n "$UNWIND_LIBS"
         then
             save_libs=$LIBS
             LIBS="$UNWIND_LIBS $LIBS"
-            AC_CACHE_CHECK([for unw_getcontext in libunwind],wine_cv_have_libunwind_unw_getcontext,
+            AC_CACHE_CHECK([for unw_step in libunwind],wine_cv_have_libunwind_unw_step,
                [AC_LINK_IFELSE([AC_LANG_PROGRAM([[#define UNW_LOCAL_ONLY
 #include <libunwind.h>]],
-                    [[unw_context_t context; unw_getcontext( &context );]])],
-                    [wine_cv_have_libunwind_unw_getcontext="yes"],
-                    [wine_cv_have_libunwind_unw_getcontext="no"])])
+                    [[unw_cursor_t cursor; unw_step( &cursor );]])],
+                    [wine_cv_have_libunwind_unw_step="yes"],
+                    [wine_cv_have_libunwind_unw_step="no"])])
             LIBS=$save_libs
         fi
-        test "$wine_cv_have_libunwind_unw_getcontext" = yes || UNWIND_LIBS=""
-        if test "x$wine_cv_have_unw_getcontext$wine_cv_have_libunwind_unw_getcontext" != xnono
+        test "$wine_cv_have_libunwind_unw_step" = yes || UNWIND_LIBS=""
+        if test "x$wine_cv_have_unw_step$wine_cv_have_libunwind_unw_step" != xnono
         then
             AC_DEFINE(HAVE_LIBUNWIND,1,[Define to 1 if you have the `unwind' library (-lunwind).])
         fi])
 fi
 case $host in
   aarch64*|*-darwin*)
-    WINE_NOTICE_WITH(unwind,[test "x$wine_cv_have_unw_getcontext$wine_cv_have_libunwind_unw_getcontext" != xnono],
+    WINE_NOTICE_WITH(unwind,[test "x$wine_cv_have_unw_step$wine_cv_have_libunwind_unw_step" = xnono],
                      [libunwind ${notice_platform}development files not found, stack unwinding won't work.]) ;;
 esac
 
@@ -3641,6 +3646,7 @@ WINE_CONFIG_MAKEFILE(dlls/schannel/tests)
 WINE_CONFIG_MAKEFILE(dlls/schedsvc)
 WINE_CONFIG_MAKEFILE(dlls/schedsvc/tests)
 WINE_CONFIG_MAKEFILE(dlls/scrobj)
+WINE_CONFIG_MAKEFILE(dlls/scrobj/tests)
 WINE_CONFIG_MAKEFILE(dlls/scrrun)
 WINE_CONFIG_MAKEFILE(dlls/scrrun/tests)
 WINE_CONFIG_MAKEFILE(dlls/scsiport.sys)

@@ -194,6 +194,8 @@ extern BOOL CDECL X11DRV_UnrealizePalette( HPALETTE hpal ) DECLSPEC_HIDDEN;
 
 extern void X11DRV_Xcursor_Init(void) DECLSPEC_HIDDEN;
 extern void X11DRV_XInput2_Init(void) DECLSPEC_HIDDEN;
+extern void X11DRV_XInput2_Enable(void) DECLSPEC_HIDDEN;
+extern void X11DRV_XInput2_Disable(void) DECLSPEC_HIDDEN;
 
 extern DWORD copy_image_bits( BITMAPINFO *info, BOOL is_r8g8b8, XImage *image,
                               const struct gdi_image_bits *src_bits, struct gdi_image_bits *dst_bits,
@@ -318,6 +320,7 @@ struct x11drv_valuator_data
     double min;
     double max;
     int number;
+    double accum;
 };
 
 struct x11drv_thread_data
@@ -335,11 +338,15 @@ struct x11drv_thread_data
     HWND     clip_hwnd;            /* message window stored in desktop while clipping is active */
     DWORD    clip_reset;           /* time when clipping was last reset */
     HKL      kbd_layout;           /* active keyboard layout */
-    enum { xi_unavailable = -1, xi_unknown, xi_disabled, xi_enabled } xi2_state; /* XInput2 state */
+    enum { xi_unavailable = -1, xi_unknown, xi_disabled, xi_enabled, xi_extra } xi2_state; /* XInput2 state */
     void    *xi2_devices;          /* list of XInput2 devices (valid when state is enabled) */
     int      xi2_device_count;
     struct x11drv_valuator_data x_rel_valuator;
     struct x11drv_valuator_data y_rel_valuator;
+    struct x11drv_valuator_data x_abs_valuator;
+    struct x11drv_valuator_data y_abs_valuator;
+    struct x11drv_valuator_data wheel_valuator;
+    double   xi2_wheel_multiplier;
     int      xi2_core_pointer;     /* XInput2 core pointer id */
     int      xi2_current_slave;    /* Current slave driving the Core pointer */
 };
@@ -382,6 +389,7 @@ extern Colormap default_colormap DECLSPEC_HIDDEN;
 extern XPixmapFormatValues **pixmap_formats DECLSPEC_HIDDEN;
 extern Window root_window DECLSPEC_HIDDEN;
 extern BOOL clipping_cursor DECLSPEC_HIDDEN;
+extern BOOL keyboard_grabbed DECLSPEC_HIDDEN;
 extern unsigned int screen_bpp DECLSPEC_HIDDEN;
 extern BOOL use_xkb DECLSPEC_HIDDEN;
 extern BOOL usexrandr DECLSPEC_HIDDEN;
@@ -425,6 +433,9 @@ enum x11drv_atoms
     XATOM_RAW_CAP_HEIGHT,
     XATOM_Rel_X,
     XATOM_Rel_Y,
+    XATOM_Abs_X,
+    XATOM_Abs_Y,
+    XATOM_Rel_Vert_Scroll,
     XATOM_WM_PROTOCOLS,
     XATOM_WM_DELETE_WINDOW,
     XATOM_WM_STATE,
@@ -552,7 +563,8 @@ struct x11drv_win_data
 {
     Display    *display;        /* display connection for the thread owning the window */
     XVisualInfo vis;            /* X visual used by this window */
-    Colormap    colormap;       /* colormap if non-default visual */
+    Colormap    whole_colormap; /* colormap if non-default visual */
+    Colormap    client_colormap; /* colormap for the client window */
     HWND        hwnd;           /* hwnd that this private data belongs to */
     Window      whole_window;   /* X window for the complete window */
     Window      client_window;  /* X window for the client area */
@@ -620,9 +632,10 @@ extern void X11DRV_InitClipboard(void) DECLSPEC_HIDDEN;
 extern void CDECL X11DRV_SetFocus( HWND hwnd ) DECLSPEC_HIDDEN;
 extern void set_window_cursor( Window window, HCURSOR handle ) DECLSPEC_HIDDEN;
 extern void sync_window_cursor( Window window ) DECLSPEC_HIDDEN;
-extern LRESULT clip_cursor_notify( HWND hwnd, HWND new_clip_hwnd ) DECLSPEC_HIDDEN;
+extern LRESULT clip_cursor_notify( HWND hwnd, HWND prev_clip_hwnd, HWND new_clip_hwnd ) DECLSPEC_HIDDEN;
 extern void ungrab_clipping_window(void) DECLSPEC_HIDDEN;
 extern void reset_clipping_window(void) DECLSPEC_HIDDEN;
+extern void retry_grab_clipping_window(void) DECLSPEC_HIDDEN;
 extern BOOL clip_fullscreen_window( HWND hwnd, BOOL reset ) DECLSPEC_HIDDEN;
 extern void move_resize_window( HWND hwnd, int dir ) DECLSPEC_HIDDEN;
 extern void X11DRV_InitKeyboard( Display *display ) DECLSPEC_HIDDEN;
@@ -638,6 +651,7 @@ extern POINT virtual_screen_to_root( INT x, INT y ) DECLSPEC_HIDDEN;
 extern POINT root_to_virtual_screen( INT x, INT y ) DECLSPEC_HIDDEN;
 extern RECT get_virtual_screen_rect(void) DECLSPEC_HIDDEN;
 extern RECT get_primary_monitor_rect(void) DECLSPEC_HIDDEN;
+extern void query_work_area( RECT *rc_work ) DECLSPEC_HIDDEN;
 extern void xinerama_init( unsigned int width, unsigned int height ) DECLSPEC_HIDDEN;
 
 struct x11drv_mode_info

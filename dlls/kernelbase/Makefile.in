@@ -4,9 +4,13 @@ IMPORTS   = uuid ntdll winecrt0 kernel32
 EXTRADLLFLAGS = -nodefaultlibs -nostartfiles -mno-cygwin
 
 C_SRCS = \
+	console.c \
+	debug.c \
 	file.c \
 	loader.c \
+	locale.c \
 	main.c \
+	memory.c \
 	path.c \
 	process.c \
 	registry.c \

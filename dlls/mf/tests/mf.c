@@ -954,6 +954,7 @@ static void test_media_session(void)
     IMFRateControl *rate_control, *rate_control2;
     MFCLOCK_PROPERTIES clock_props;
     IMFRateSupport *rate_support;
+    IMFAttributes *attributes;
     IMFMediaSession *session;
     IMFGetService *gs;
     IMFClock *clock;
@@ -1042,6 +1043,27 @@ todo_wine
     ok(hr == MF_E_SHUTDOWN, "Unexpected hr %#x.\n", hr);
 
     IMFMediaSession_Release(session);
+
+    /* Custom topology loader, GUID is not registered. */
+    hr = MFCreateAttributes(&attributes, 1);
+    ok(hr == S_OK, "Failed to create attributes, hr %#x.\n", hr);
+
+    hr = IMFAttributes_SetGUID(attributes, &MF_SESSION_TOPOLOADER, &MF_SESSION_TOPOLOADER);
+    ok(hr == S_OK, "Failed to set attribute, hr %#x.\n", hr);
+
+    hr = MFCreateMediaSession(attributes, &session);
+    ok(hr == S_OK, "Failed to create media session, hr %#x.\n", hr);
+    IMFMediaSession_Release(session);
+
+    /* Disabled quality manager. */
+    hr = IMFAttributes_SetGUID(attributes, &MF_SESSION_QUALITY_MANAGER, &GUID_NULL);
+    ok(hr == S_OK, "Failed to set attribute, hr %#x.\n", hr);
+
+    hr = MFCreateMediaSession(attributes, &session);
+    ok(hr == S_OK, "Failed to create media session, hr %#x.\n", hr);
+    IMFMediaSession_Release(session);
+
+    IMFAttributes_Release(attributes);
 
     hr = MFShutdown();
     ok(hr == S_OK, "Shutdown failure, hr %#x.\n", hr);
@@ -2398,6 +2420,17 @@ failed:
     CoUninitialize();
 }
 
+static void test_quality_manager(void)
+{
+    IMFQualityManager *manager;
+    HRESULT hr;
+
+    hr = MFCreateStandardQualityManager(&manager);
+    ok(hr == S_OK, "Failed to create quality manager, hr %#x.\n", hr);
+
+    IMFQualityManager_Release(manager);
+}
+
 START_TEST(mf)
 {
     test_topology();
@@ -2409,4 +2442,5 @@ START_TEST(mf)
     test_presentation_clock();
     test_sample_grabber();
     test_video_processor();
+    test_quality_manager();
 }

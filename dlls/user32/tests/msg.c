@@ -567,6 +567,7 @@ static const struct message WmShowRestoreMaxOverlappedSeq[] = {
     { WM_GETTITLEBARINFOEX, sent|optional },
     { WM_NCPAINT, sent|beginpaint|optional },
     { WM_ERASEBKGND, sent|beginpaint|optional },
+    { WM_SYNCPAINT, sent|optional },
     { 0 }
 };
 /* ShowWindow(SW_RESTORE) for a not visible minimized overlapped window */
@@ -837,6 +838,7 @@ static const struct message WmShowMaxPopupSeq[] = {
     { WM_ERASEBKGND, sent|defwinproc|optional },
     { WM_WINDOWPOSCHANGED, sent|wparam, SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE|SWP_SHOWWINDOW|SWP_FRAMECHANGED|SWP_NOMOVE|SWP_NOSIZE },
     { EVENT_OBJECT_LOCATIONCHANGE, winevent_hook|wparam|lparam, 0, 0 },
+    { WM_SIZE, sent|defwinproc|optional },
     { 0 }
 };
 /* CreateWindow(WS_VISIBLE) for popup window */
@@ -3477,6 +3479,7 @@ static const struct message WmMaximizeMDIchildInvisibleSeq2[] = {
     { WM_MDIACTIVATE, sent|defwinproc|optional },
     { WM_WINDOWPOSCHANGED, sent|wparam, SWP_SHOWWINDOW|SWP_FRAMECHANGED|SWP_NOSIZE|SWP_NOMOVE|SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE },
     { EVENT_OBJECT_LOCATIONCHANGE, winevent_hook|wparam|lparam, 0, 0 }, /* MDI child */
+    { WM_SIZE, sent|defwinproc|optional },
     { 0 }
 };
 /* WM_MDIMAXIMIZE for an MDI child window with invisible parent */
@@ -12170,6 +12173,31 @@ todo_wine {
         qstatus = GetQueueStatus(qs_all_input);
         ok(qstatus == 0, "wrong qstatus %08x\n", qstatus);
     }
+
+    PostThreadMessageA(GetCurrentThreadId(), WM_USER, 0, 0);
+    ret = PeekMessageA(&msg, (HWND)-1, 0, 0, PM_NOREMOVE);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+    ret = GetMessageA(&msg, (HWND)-1, 0, 0);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+
+    PostThreadMessageA(GetCurrentThreadId(), WM_USER, 0, 0);
+    ret = PeekMessageA(&msg, (HWND)1, 0, 0, PM_NOREMOVE);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+    ret = GetMessageA(&msg, (HWND)1, 0, 0);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+
+    PostThreadMessageA(GetCurrentThreadId(), WM_USER, 0, 0);
+    ret = PeekMessageA(&msg, (HWND)0xffff, 0, 0, PM_NOREMOVE);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+    ret = GetMessageA(&msg, (HWND)0xffff, 0, 0);
+    ok(ret == TRUE, "wrong ret %d\n", ret);
+    ok(msg.message == WM_USER, "wrong message %u\n", msg.message);
+
 done:
     trace("signalling to exit\n");
     SetEvent(info.hevent[EV_STOP]);
@@ -13613,6 +13641,8 @@ static const struct message WmCreateDialogParamSeq_3[] = {
     { WM_QUERYNEWPALETTE, sent|parent|optional }, /* TODO: this message should not be sent */
     { WM_WINDOWPOSCHANGING, sent|parent|wparam|optional, SWP_NOSIZE|SWP_NOMOVE },
     { WM_WINDOWPOSCHANGING, sent|parent|wparam|optional, SWP_NOSIZE|SWP_NOMOVE },
+    { WM_WINDOWPOSCHANGED, sent|parent|wparam|optional, SWP_NOREDRAW|SWP_NOSIZE|SWP_NOMOVE|SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE },
+    { WM_WINDOWPOSCHANGED, sent|parent|wparam|optional, SWP_NOREDRAW|SWP_NOSIZE|SWP_NOMOVE|SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE },
     { WM_ACTIVATEAPP, sent|parent|wparam, 1 },
     { WM_NCACTIVATE, sent|parent },
     { WM_ACTIVATE, sent|parent|wparam, 1 },
@@ -16541,15 +16571,15 @@ static void test_hotkey(void)
 
     SetLastError(0xdeadbeef);
     ret = UnregisterHotKey(NULL, 0);
-    ok(ret == FALSE, "expected FALSE, got %i\n", ret);
-    ok(GetLastError() == ERROR_HOTKEY_NOT_REGISTERED || broken(GetLastError() == 0xdeadbeef),
-       "unexpected error %d\n", GetLastError());
-
     if (ret == TRUE)
     {
         skip("hotkeys not supported\n");
         return;
     }
+
+    ok(ret == FALSE, "expected FALSE, got %i\n", ret);
+    ok(GetLastError() == ERROR_HOTKEY_NOT_REGISTERED || broken(GetLastError() == 0xdeadbeef),
+       "unexpected error %d\n", GetLastError());
 
     test_window = CreateWindowExA(0, "HotkeyWindowClass", NULL, WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                            100, 100, 200, 200, 0, 0, 0, NULL);
@@ -17661,6 +17691,22 @@ done:
     DestroyWindow(hwnd);
 }
 
+static void test_invalid_window(void)
+{
+    MSG msg;
+    BOOL ret;
+
+    SetLastError(0xdeadbeef);
+    ret = GetMessageA(&msg, (HWND)0xdeadbeef, 0, 0);
+    ok(ret == -1, "wrong ret %d\n", ret);
+    ok(GetLastError() == ERROR_INVALID_WINDOW_HANDLE, "wrong error %u\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = PeekMessageA(&msg, (HWND)0xdeadbeef, 0, 0, PM_REMOVE);
+    ok(!ret, "wrong ret %d\n", ret);
+    ok(GetLastError() == ERROR_INVALID_WINDOW_HANDLE, "wrong error %u\n", GetLastError());
+}
+
 static void init_funcs(void)
 {
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
@@ -17786,6 +17832,7 @@ START_TEST(msg)
     test_notify_message();
     test_SetActiveWindow();
     test_restore_messages();
+    test_invalid_window();
 
     if (!pTrackMouseEvent)
         win_skip("TrackMouseEvent is not available\n");

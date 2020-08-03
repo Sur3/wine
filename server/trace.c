@@ -405,6 +405,27 @@ static void dump_hw_input( const char *prefix, const hw_input_t *input )
     }
 }
 
+static void dump_hw_rawinput( const char *prefix, const hw_rawinput_t *rawinput )
+{
+    switch (rawinput->type)
+    {
+    case RIM_TYPEMOUSE:
+        fprintf( stderr, "%s{type=MOUSE,flags=%04hx,x=%d,y=%d,button_flags=%04hx,button_data=%04hx}",
+                 prefix, rawinput->mouse.flags, rawinput->mouse.x, rawinput->mouse.y,
+                 rawinput->mouse.button_flags, rawinput->mouse.button_data);
+        break;
+    case RIM_TYPEKEYBOARD:
+        fprintf( stderr, "%s{type=KEYBOARD}\n", prefix);
+        break;
+    case RIM_TYPEHID:
+        fprintf( stderr, "%s{type=HID}\n", prefix);
+        break;
+    default:
+        fprintf( stderr, "%s{type=%04x}", prefix, rawinput->type);
+        break;
+    }
+}
+
 static void dump_luid( const char *prefix, const luid_t *luid )
 {
     fprintf( stderr, "%s%d.%u", prefix, luid->high_part, luid->low_part );

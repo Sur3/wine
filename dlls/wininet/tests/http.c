@@ -2431,6 +2431,13 @@ static DWORD CALLBACK server_thread(LPVOID param)
             else
                 send(c, notokmsg, sizeof notokmsg-1, 0);
         }
+        if (strstr(buffer, "HEAD /upload3.txt"))
+        {
+            if (strstr(buffer, "Authorization: Basic dXNlcjE6cHdkMQ=="))
+                send(c, okmsg, sizeof okmsg-1, 0);
+            else
+                send(c, noauthmsg, sizeof noauthmsg-1, 0);
+        }
         if (strstr(buffer, "/test_host_override"))
         {
             if (strstr(buffer, host_header_override))
@@ -4425,6 +4432,7 @@ static void test_basic_auth_credentials_reuse(int port)
     HINTERNET ses, con, req;
     DWORD status, size;
     BOOL ret;
+    char buffer[0x40];
 
     ses = InternetOpenA( "winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0 );
     ok( ses != NULL, "InternetOpenA failed\n" );
@@ -4438,6 +4446,20 @@ static void test_basic_auth_credentials_reuse(int port)
 
     ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
     ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "user"), "got %s\n", buffer);
+    ok(size == 4, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "pwd"), "got %s\n", buffer);
+    ok(size == 3, "got %u\n", size);
 
     status = 0xdeadbeef;
     size = sizeof(status);
@@ -4461,6 +4483,188 @@ static void test_basic_auth_credentials_reuse(int port)
 
     ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
     ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "user"), "got %s\n", buffer);
+    ok(size == 4, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "pwd"), "got %s\n", buffer);
+    ok(size == 3, "got %u\n", size);
+
+    status = 0xdeadbeef;
+    size = sizeof(status);
+    ret = HttpQueryInfoA( req, HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL );
+    ok( ret, "HttpQueryInfoA failed %u\n", GetLastError() );
+    ok( status == 200, "got %u\n", status );
+
+    InternetCloseHandle( req );
+    InternetCloseHandle( con );
+    InternetCloseHandle( ses );
+}
+
+static void test_basic_auth_credentials_end_session(int port)
+{
+    HINTERNET ses, con, req;
+    DWORD status, size;
+    BOOL ret;
+    char buffer[0x40];
+
+    ses = InternetOpenA( "winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0 );
+    ok( ses != NULL, "InternetOpenA failed\n" );
+
+    con = InternetConnectA( ses, "localhost", port, "user", "pwd",
+                            INTERNET_SERVICE_HTTP, 0, 0 );
+    ok( con != NULL, "InternetConnectA failed %u\n", GetLastError() );
+
+    req = HttpOpenRequestA( con, "HEAD", "/upload.txt", NULL, NULL, NULL, 0, 0 );
+    ok( req != NULL, "HttpOpenRequestA failed %u\n", GetLastError() );
+
+    ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
+    ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "user"), "got %s\n", buffer);
+    ok(size == 4, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "pwd"), "got %s\n", buffer);
+    ok(size == 3, "got %u\n", size);
+
+    status = 0xdeadbeef;
+    size = sizeof(status);
+    ret = HttpQueryInfoA( req, HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL );
+    ok( ret, "HttpQueryInfoA failed %u\n", GetLastError() );
+    ok( status == HTTP_STATUS_OK, "got %u\n", status );
+
+    InternetCloseHandle( req );
+    InternetCloseHandle( con );
+    InternetCloseHandle( ses );
+
+    ses = InternetOpenA( "winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0 );
+    ok( ses != NULL, "InternetOpenA failed\n" );
+
+    /* Clear the cached credentials */
+    ret = InternetSetOptionA(ses,  INTERNET_OPTION_END_BROWSER_SESSION, NULL, 0);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+
+    con = InternetConnectA( ses, "localhost", port, NULL, NULL,
+                            INTERNET_SERVICE_HTTP, 0, 0 );
+    ok( con != NULL, "InternetConnectA failed %u\n", GetLastError() );
+
+    req = HttpOpenRequestA( con, "PUT", "/upload2.txt", NULL, NULL, NULL, 0, 0 );
+    ok( req != NULL, "HttpOpenRequestA failed %u\n", GetLastError() );
+
+    ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
+    ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, ""), "got %s\n", buffer);
+    ok(size == 0, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, ""), "got %s\n", buffer);
+    ok(size == 0, "got %u\n", size);
+
+    status = 0xdeadbeef;
+    size = sizeof(status);
+    ret = HttpQueryInfoA( req, HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL );
+    ok( ret, "HttpQueryInfoA failed %u\n", GetLastError() );
+    ok( status == HTTP_STATUS_BAD_REQUEST, "got %u\n", status );
+
+    InternetCloseHandle( req );
+    InternetCloseHandle( con );
+    InternetCloseHandle( ses );
+}
+
+static void test_basic_auth_credentials_different(int port)
+{
+    HINTERNET ses, con, req;
+    DWORD status, size;
+    BOOL ret;
+    char buffer[0x40];
+
+    ses = InternetOpenA( "winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0 );
+    ok( ses != NULL, "InternetOpenA failed\n" );
+
+    con = InternetConnectA( ses, "localhost", port, "user", "pwd",
+                            INTERNET_SERVICE_HTTP, 0, 0 );
+    ok( con != NULL, "InternetConnectA failed %u\n", GetLastError() );
+
+    req = HttpOpenRequestA( con, "HEAD", "/upload.txt", NULL, NULL, NULL, 0, 0 );
+    ok( req != NULL, "HttpOpenRequestA failed %u\n", GetLastError() );
+
+    ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
+    ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "user"), "got %s\n", buffer);
+    ok(size == 4, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "pwd"), "got %s\n", buffer);
+    ok(size == 3, "got %u\n", size);
+
+    status = 0xdeadbeef;
+    size = sizeof(status);
+    ret = HttpQueryInfoA( req, HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL );
+    ok( ret, "HttpQueryInfoA failed %u\n", GetLastError() );
+    ok( status == 200, "got %u\n", status );
+
+    InternetCloseHandle( req );
+    InternetCloseHandle( con );
+    InternetCloseHandle( ses );
+
+    ses = InternetOpenA( "winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0 );
+    ok( ses != NULL, "InternetOpenA failed\n" );
+
+    con = InternetConnectA( ses, "localhost", port, "user1", "pwd1",
+                            INTERNET_SERVICE_HTTP, 0, 0 );
+    ok( con != NULL, "InternetConnectA failed %u\n", GetLastError() );
+
+    req = HttpOpenRequestA( con, "HEAD", "/upload3.txt", NULL, NULL, NULL, 0, 0 );
+    ok( req != NULL, "HttpOpenRequestA failed %u\n", GetLastError() );
+
+    ret = HttpSendRequestA( req, NULL, 0, NULL, 0 );
+    ok( ret, "HttpSendRequestA failed %u\n", GetLastError() );
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_USERNAME, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "user1"), "got %s\n", buffer);
+    ok(size == 5, "got %u\n", size);
+
+    size = sizeof(buffer);
+    SetLastError(0xdeadbeef);
+    ret = InternetQueryOptionA(req, INTERNET_OPTION_PASSWORD, buffer, &size);
+    ok(ret, "unexpected failure %u\n", GetLastError());
+    ok(!strcmp(buffer, "pwd1"), "got %s\n", buffer);
+    ok(size == 4, "got %u\n", size);
 
     status = 0xdeadbeef;
     size = sizeof(status);
@@ -5545,7 +5749,9 @@ static void test_large_content(int port)
     };
     test_request_t req;
     DWORD sizelen, len;
+    DWORD read_size;
     DWORD64 len64;
+    char buf[16];
     BOOL ret;
     size_t i;
 
@@ -5594,6 +5800,24 @@ static void test_large_content(int port)
     ok(len64 == ~0, "len64 %x%08x\n", (DWORD)(len64 >> 32), (DWORD)len64);
 
     close_request(&req);
+
+    /* test internal use of HttpQueryInfo on large size */
+    open_read_test_request(port, &req,
+                           "HTTP/1.1 200 OK\r\n"
+                           "Server: winetest\r\n"
+                           "Content-Length: 4294967296\r\n"
+                           "\r\n"
+                           "xx");
+    read_expect_async(req.request, buf, 4, &read_size, "xx");
+    send_response_and_wait("yy1234567890", FALSE, buf, &read_size, "xxyy", 4, 0, 2);
+    read_expect_sync_data(req.request, buf, 10, "1234567890");
+
+    SET_EXPECT(INTERNET_STATUS_CLOSING_CONNECTION);
+    SET_EXPECT(INTERNET_STATUS_CONNECTION_CLOSED);
+    close_async_handle(req.session, 2);
+    CHECK_NOTIFIED(INTERNET_STATUS_CLOSING_CONNECTION);
+    CHECK_NOTIFIED(INTERNET_STATUS_CONNECTION_CLOSED);
+    close_connection();
 }
 
 static void test_http_connection(void)
@@ -5647,6 +5871,8 @@ static void test_http_connection(void)
     test_request_content_length(si.port);
     test_accept_encoding(si.port);
     test_basic_auth_credentials_reuse(si.port);
+    test_basic_auth_credentials_end_session(si.port);
+    test_basic_auth_credentials_different(si.port);
     test_async_read(si.port);
     test_http_read(si.port);
     test_connection_break(si.port);

@@ -774,6 +774,7 @@ enum wined3d_stateblock_type
     WINED3D_SBT_PIXEL_STATE                 = 2,
     WINED3D_SBT_VERTEX_STATE                = 3,
     WINED3D_SBT_RECORDED                    = 4, /* WineD3D private */
+    WINED3D_SBT_PRIMARY                     = 5, /* WineD3D private */
 };
 
 enum wined3d_decl_method
@@ -2228,7 +2229,7 @@ ULONG __cdecl wined3d_buffer_incref(struct wined3d_buffer *buffer);
 
 HRESULT __cdecl wined3d_device_acquire_focus_window(struct wined3d_device *device, HWND window);
 HRESULT __cdecl wined3d_device_begin_scene(struct wined3d_device *device);
-HRESULT __cdecl wined3d_device_begin_stateblock(struct wined3d_device *device);
+HRESULT __cdecl wined3d_device_begin_stateblock(struct wined3d_device *device, struct wined3d_stateblock **stateblock);
 HRESULT __cdecl wined3d_device_clear(struct wined3d_device *device, DWORD rect_count, const RECT *rects, DWORD flags,
         const struct wined3d_color *color, float z, DWORD stencil);
 HRESULT __cdecl wined3d_device_clear_rendertarget_view(struct wined3d_device *device,
@@ -2264,7 +2265,7 @@ void __cdecl wined3d_device_draw_primitive_instanced(struct wined3d_device *devi
 void __cdecl wined3d_device_draw_primitive_instanced_indirect(struct wined3d_device *device,
         struct wined3d_buffer *buffer, unsigned int offset);
 HRESULT __cdecl wined3d_device_end_scene(struct wined3d_device *device);
-HRESULT __cdecl wined3d_device_end_stateblock(struct wined3d_device *device, struct wined3d_stateblock **stateblock);
+HRESULT __cdecl wined3d_device_end_stateblock(struct wined3d_device *device);
 void __cdecl wined3d_device_evict_managed_resources(struct wined3d_device *device);
 UINT __cdecl wined3d_device_get_available_texture_mem(const struct wined3d_device *device);
 INT __cdecl wined3d_device_get_base_vertex_index(const struct wined3d_device *device);
@@ -2659,6 +2660,8 @@ HRESULT __cdecl wined3d_stateblock_create(struct wined3d_device *device,
         enum wined3d_stateblock_type type, struct wined3d_stateblock **stateblock);
 ULONG __cdecl wined3d_stateblock_decref(struct wined3d_stateblock *stateblock);
 ULONG __cdecl wined3d_stateblock_incref(struct wined3d_stateblock *stateblock);
+HRESULT __cdecl wined3d_stateblock_set_vs_consts_f(struct wined3d_stateblock *stateblock,
+        unsigned int start_idx, unsigned int count, const struct wined3d_vec4 *constants);
 
 HRESULT __cdecl wined3d_swapchain_create(struct wined3d_device *device, struct wined3d_swapchain_desc *desc,
         void *parent, const struct wined3d_parent_ops *parent_ops, struct wined3d_swapchain **swapchain);

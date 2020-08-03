@@ -398,6 +398,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_460,         "Radeon(TM) RX 460 Graphics",       DRIVER_AMD_RX,           4096},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_480,         "Radeon (TM) RX 480 Graphics",      DRIVER_AMD_RX,           4096},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_VEGA_10,     "Radeon RX Vega",                   DRIVER_AMD_RX,           8192},
+    {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_VEGA_12,     "Radeon Pro Vega 20",               DRIVER_AMD_RX,           4096},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_VEGA_20,     "Radeon RX Vega 20",                DRIVER_AMD_RX,           4096},
 
     /* Red Hat */
@@ -2353,7 +2354,7 @@ static void adapter_no3d_uninit_3d(struct wined3d_device *device)
 }
 
 static void *adapter_no3d_map_bo_address(struct wined3d_context *context,
-        const struct wined3d_bo_address *data, size_t size, GLenum binding, uint32_t flags)
+        const struct wined3d_bo_address *data, size_t size, uint32_t bind_flags, uint32_t map_flags)
 {
     if (data->buffer_object)
     {
@@ -2364,11 +2365,24 @@ static void *adapter_no3d_map_bo_address(struct wined3d_context *context,
     return data->addr;
 }
 
-static void adapter_no3d_unmap_bo_address(struct wined3d_context *context,
-        const struct wined3d_bo_address *data, GLenum binding)
+static void adapter_no3d_unmap_bo_address(struct wined3d_context *context, const struct wined3d_bo_address *data,
+        uint32_t bind_flags, unsigned int range_count, const struct wined3d_map_range *ranges)
 {
     if (data->buffer_object)
         ERR("Unsupported buffer object %#lx.\n", data->buffer_object);
+}
+
+static void adapter_no3d_copy_bo_address(struct wined3d_context *context,
+        const struct wined3d_bo_address *dst, uint32_t dst_bind_flags,
+        const struct wined3d_bo_address *src, uint32_t src_bind_flags, size_t size)
+{
+    if (dst->buffer_object)
+        ERR("Unsupported dst buffer object %#lx.\n", dst->buffer_object);
+    if (src->buffer_object)
+        ERR("Unsupported src buffer object %#lx.\n", src->buffer_object);
+    if (dst->buffer_object || src->buffer_object)
+        return;
+    memcpy(dst->addr, src->addr, size);
 }
 
 static HRESULT adapter_no3d_create_swapchain(struct wined3d_device *device, struct wined3d_swapchain_desc *desc,
@@ -2606,6 +2620,12 @@ static void adapter_no3d_flush_context(struct wined3d_context *context)
     TRACE("context %p.\n", context);
 }
 
+void adapter_no3d_clear_uav(struct wined3d_context *context,
+        struct wined3d_unordered_access_view *view, const struct wined3d_uvec4 *clear_value)
+{
+    ERR("context %p, view %p, clear_value %s.\n", context, view, debug_uvec4(clear_value));
+}
+
 static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops =
 {
     adapter_no3d_destroy,
@@ -2619,6 +2639,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops =
     adapter_no3d_uninit_3d,
     adapter_no3d_map_bo_address,
     adapter_no3d_unmap_bo_address,
+    adapter_no3d_copy_bo_address,
     adapter_no3d_create_swapchain,
     adapter_no3d_destroy_swapchain,
     adapter_no3d_create_buffer,
@@ -2636,6 +2657,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops =
     adapter_no3d_create_query,
     adapter_no3d_destroy_query,
     adapter_no3d_flush_context,
+    adapter_no3d_clear_uav,
 };
 
 static void wined3d_adapter_no3d_init_d3d_info(struct wined3d_adapter *adapter, unsigned int wined3d_creation_flags)

@@ -372,6 +372,9 @@ static void set_cursor_pos( struct desktop *desktop, int x, int y )
     static const struct hw_msg_source source = { IMDT_UNAVAILABLE, IMO_SYSTEM };
     struct message *msg;
 
+    if (current->process->rawinput_mouse &&
+        current->process->rawinput_mouse->flags & RIDEV_NOLEGACY) return;
+
     if (!(msg = alloc_hardware_message( 0, source, get_tick_count() ))) return;
 
     msg->msg = WM_MOUSEMOVE;
@@ -1596,6 +1599,8 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
     return 1;
 }
 
+static int emulate_raw_mouse = 1;
+
 /* queue a hardware message for a mouse event */
 static int queue_mouse_message( struct desktop *desktop, user_handle_t win, const hw_input_t *input,
                                 unsigned int origin, struct msg_queue *sender )
@@ -1622,6 +1627,16 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         0,               /* 0x0400 = unused */
         WM_MOUSEWHEEL,   /* 0x0800 = MOUSEEVENTF_WHEEL */
         WM_MOUSEHWHEEL   /* 0x1000 = MOUSEEVENTF_HWHEEL */
+    };
+
+    static const unsigned int raw_button_flags[] =     {
+        0,                            /* 0x0001 = MOUSEEVENTF_MOVE */
+        RI_MOUSE_LEFT_BUTTON_DOWN,    /* 0x0002 = MOUSEEVENTF_LEFTDOWN */
+        RI_MOUSE_LEFT_BUTTON_UP,      /* 0x0004 = MOUSEEVENTF_LEFTUP */
+        RI_MOUSE_RIGHT_BUTTON_DOWN,   /* 0x0008 = MOUSEEVENTF_RIGHTDOWN */
+        RI_MOUSE_RIGHT_BUTTON_UP,     /* 0x0010 = MOUSEEVENTF_RIGHTUP */
+        RI_MOUSE_MIDDLE_BUTTON_DOWN,  /* 0x0020 = MOUSEEVENTF_MIDDLEDOWN */
+        RI_MOUSE_MIDDLE_BUTTON_UP,    /* 0x0040 = MOUSEEVENTF_MIDDLEUP */
     };
 
     desktop->cursor.last_change = get_tick_count();
@@ -1651,7 +1666,8 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         y = desktop->cursor.y;
     }
 
-    if ((device = current->process->rawinput_mouse))
+    device = current->process->rawinput_mouse;
+    if (device && emulate_raw_mouse)
     {
         if (!(msg = alloc_hardware_message( input->mouse.info, source, time ))) return 0;
         msg_data = msg->data;
@@ -1661,14 +1677,49 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         msg->wparam    = RIM_INPUT;
         msg->lparam    = 0;
 
-        msg_data->flags               = flags;
+        msg_data->flags               = 0;
         msg_data->rawinput.type       = RIM_TYPEMOUSE;
         msg_data->rawinput.mouse.x    = x - desktop->cursor.x;
         msg_data->rawinput.mouse.y    = y - desktop->cursor.y;
-        msg_data->rawinput.mouse.data = input->mouse.data;
+        msg_data->rawinput.mouse.button_flags = 0;
+        msg_data->rawinput.mouse.button_data = 0;
+
+        for (i = 1; i < ARRAY_SIZE(raw_button_flags); ++i)
+        {
+            if (flags & (1 << i))
+                msg_data->rawinput.mouse.button_flags |= raw_button_flags[i];
+        }
+
+        if (flags & MOUSEEVENTF_WHEEL)
+        {
+            msg_data->rawinput.mouse.button_flags |= RI_MOUSE_WHEEL;
+            msg_data->rawinput.mouse.button_data   = input->mouse.data;
+        }
+        if (flags & MOUSEEVENTF_HWHEEL)
+        {
+            msg_data->rawinput.mouse.button_flags |= RI_MOUSE_HORIZONTAL_WHEEL;
+            msg_data->rawinput.mouse.button_data   = input->mouse.data;
+        }
+        if (flags & MOUSEEVENTF_XDOWN)
+        {
+            if (input->mouse.data == XBUTTON1)
+                msg_data->rawinput.mouse.button_flags |= RI_MOUSE_BUTTON_4_DOWN;
+            else if (input->mouse.data == XBUTTON2)
+                msg_data->rawinput.mouse.button_flags |= RI_MOUSE_BUTTON_5_DOWN;
+        }
+        if (flags & MOUSEEVENTF_XUP)
+        {
+            if (input->mouse.data == XBUTTON1)
+                msg_data->rawinput.mouse.button_flags |= RI_MOUSE_BUTTON_4_UP;
+            else if (input->mouse.data == XBUTTON2)
+                msg_data->rawinput.mouse.button_flags |= RI_MOUSE_BUTTON_5_UP;
+        }
 
         queue_hardware_message( desktop, msg, 0 );
     }
+
+    if (device && device->flags & RIDEV_NOLEGACY)
+        return FALSE;
 
     for (i = 0; i < ARRAY_SIZE( messages ); i++)
     {
@@ -1794,6 +1845,9 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
 
         queue_hardware_message( desktop, msg, 0 );
     }
+
+    if (device && device->flags & RIDEV_NOLEGACY)
+        return FALSE;
 
     if (!(msg = alloc_hardware_message( input->kbd.info, source, time ))) return 0;
     msg_data = msg->data;
@@ -2370,6 +2424,58 @@ DECL_HANDLER(send_hardware_message)
     release_object( desktop );
 }
 
+/* send a hardware rawinput message to the queue thread */
+DECL_HANDLER(send_rawinput_message)
+{
+    const struct rawinput_device *device;
+    struct hardware_msg_data *msg_data;
+    struct message *msg;
+    struct desktop *desktop;
+    struct hw_msg_source source = { IMDT_MOUSE, IMO_HARDWARE };
+
+    desktop = get_thread_desktop( current, 0 );
+
+    switch (req->input.type)
+    {
+    case RIM_TYPEMOUSE:
+        emulate_raw_mouse = 0;
+        if ((device = current->process->rawinput_mouse))
+        {
+            struct thread *thread = device->target ? get_window_thread( device->target ) : NULL;
+            if ((current->queue->input != desktop->foreground_input && !(device->flags & RIDEV_INPUTSINK))
+             || (thread && thread != current)
+             || (!thread && device->flags & RIDEV_INPUTSINK))
+                goto done;
+
+            if (!(msg = alloc_hardware_message( 0, source, 0 ))) goto done;
+            msg_data = msg->data;
+
+            msg->win       = device->target;
+            msg->msg       = WM_INPUT;
+            msg->wparam    = RIM_INPUT;
+            msg->lparam    = 0;
+
+            msg_data->flags               = 0;
+            msg_data->rawinput.type       = RIM_TYPEMOUSE;
+            msg_data->rawinput.mouse.x    = req->input.mouse.x;
+            msg_data->rawinput.mouse.y    = req->input.mouse.y;
+            msg_data->rawinput.mouse.button_flags = req->input.mouse.button_flags;
+            msg_data->rawinput.mouse.button_data = req->input.mouse.button_data;
+            msg_data->rawinput.mouse.flags = req->input.mouse.flags;
+
+            queue_hardware_message( desktop, msg, 0 );
+
+            done:
+            if (thread) release_object( thread );
+        }
+        break;
+    default:
+        set_error( STATUS_INVALID_PARAMETER );
+    }
+
+    release_object(desktop);
+}
+
 /* post a quit message to the current queue */
 DECL_HANDLER(post_quit_message)
 {
@@ -2393,6 +2499,12 @@ DECL_HANDLER(get_message)
     unsigned int filter = req->flags >> 16;
 
     reply->active_hooks = get_active_hooks();
+
+    if (get_win && get_win != 1 && get_win != -1 && !get_user_object( get_win, USER_WINDOW ))
+    {
+        set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
+        return;
+    }
 
     if (!queue) return;
     queue->last_get_msg = current_time;

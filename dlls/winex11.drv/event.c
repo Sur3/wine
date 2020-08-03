@@ -155,6 +155,9 @@ static const char * event_names[MAX_EVENT_HANDLERS] =
     "SelectionNotify", "ColormapNotify", "ClientMessage", "MappingNotify", "GenericEvent"
 };
 
+/* is someone else grabbing the keyboard, for example the WM, when manipulating the window */
+BOOL keyboard_grabbed = FALSE;
+
 int xinput2_opcode = 0;
 
 /* return the name of an X event */
@@ -272,46 +275,6 @@ enum event_merge_action
 };
 
 /***********************************************************************
- *           merge_raw_motion_events
- */
-#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
-static enum event_merge_action merge_raw_motion_events( XIRawEvent *prev, XIRawEvent *next )
-{
-    int i, j, k;
-    unsigned char mask;
-
-    if (!prev->valuators.mask_len) return MERGE_HANDLE;
-    if (!next->valuators.mask_len) return MERGE_HANDLE;
-
-    mask = prev->valuators.mask[0] | next->valuators.mask[0];
-    if (mask == next->valuators.mask[0])  /* keep next */
-    {
-        for (i = j = k = 0; i < 8; i++)
-        {
-            if (XIMaskIsSet( prev->valuators.mask, i ))
-                next->valuators.values[j] += prev->valuators.values[k++];
-            if (XIMaskIsSet( next->valuators.mask, i )) j++;
-        }
-        TRACE( "merging duplicate GenericEvent\n" );
-        return MERGE_DISCARD;
-    }
-    if (mask == prev->valuators.mask[0])  /* keep prev */
-    {
-        for (i = j = k = 0; i < 8; i++)
-        {
-            if (XIMaskIsSet( next->valuators.mask, i ))
-                prev->valuators.values[j] += next->valuators.values[k++];
-            if (XIMaskIsSet( prev->valuators.mask, i )) j++;
-        }
-        TRACE( "merging duplicate GenericEvent\n" );
-        return MERGE_IGNORE;
-    }
-    /* can't merge events with disjoint masks */
-    return MERGE_HANDLE;
-}
-#endif
-
-/***********************************************************************
  *           merge_events
  *
  * Try to merge 2 consecutive events.
@@ -362,7 +325,7 @@ static enum event_merge_action merge_events( XEvent *prev, XEvent *next )
             if (next->xcookie.extension != xinput2_opcode) break;
             if (next->xcookie.evtype != XI_RawMotion) break;
             if (x11drv_thread_data()->warp_serial) break;
-            return merge_raw_motion_events( prev->xcookie.data, next->xcookie.data );
+            return MERGE_HANDLE;
 #endif
         }
         break;
@@ -772,6 +735,24 @@ static BOOL X11DRV_FocusIn( HWND hwnd, XEvent *xev )
     if (event->detail == NotifyPointer) return FALSE;
     if (hwnd == GetDesktopWindow()) return FALSE;
 
+    switch (event->mode)
+    {
+    case NotifyGrab:
+        /* these are received when moving undecorated managed windows on mutter */
+        keyboard_grabbed = TRUE;
+        return FALSE;
+    case NotifyWhileGrabbed:
+        keyboard_grabbed = TRUE;
+        break;
+    case NotifyNormal:
+        keyboard_grabbed = FALSE;
+        break;
+    case NotifyUngrab:
+        keyboard_grabbed = FALSE;
+        retry_grab_clipping_window();
+        return TRUE; /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
+    }
+
     if ((xic = X11DRV_get_ic( hwnd ))) XSetICFocus( xic );
     if (use_take_focus)
     {
@@ -855,6 +836,31 @@ static BOOL X11DRV_FocusOut( HWND hwnd, XEvent *xev )
         return TRUE;
     }
     if (!hwnd) return FALSE;
+
+    switch (event->mode)
+    {
+    case NotifyUngrab:
+        /* these are received when moving undecorated managed windows on mutter */
+        keyboard_grabbed = FALSE;
+        return FALSE;
+    case NotifyNormal:
+        keyboard_grabbed = FALSE;
+        break;
+    case NotifyWhileGrabbed:
+        keyboard_grabbed = TRUE;
+        break;
+    case NotifyGrab:
+        keyboard_grabbed = TRUE;
+
+        /* This will do nothing due to keyboard_grabbed == TRUE, but it
+         * will save the current clipping rect so we can restore it on
+         * FocusIn with NotifyUngrab mode.
+         */
+        retry_grab_clipping_window();
+
+        return TRUE; /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
+    }
+
     focus_out( event->display, hwnd );
     return TRUE;
 }
@@ -940,11 +946,8 @@ static BOOL X11DRV_MapNotify( HWND hwnd, XEvent *event )
 {
     struct x11drv_win_data *data;
 
-    if (event->xany.window == x11drv_thread_data()->clip_window)
-    {
-        clipping_cursor = TRUE;
-        return TRUE;
-    }
+    if (event->xany.window == x11drv_thread_data()->clip_window) return TRUE;
+
     if (!(data = get_win_data( hwnd ))) return FALSE;
 
     if (!data->managed && !data->embedded && data->mapped)
@@ -963,8 +966,6 @@ static BOOL X11DRV_MapNotify( HWND hwnd, XEvent *event )
  */
 static BOOL X11DRV_UnmapNotify( HWND hwnd, XEvent *event )
 {
-    if (event->xany.window == x11drv_thread_data()->clip_window)
-        clipping_cursor = FALSE;
     return TRUE;
 }
 

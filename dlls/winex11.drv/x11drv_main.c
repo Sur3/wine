@@ -120,6 +120,9 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
     "RAW_CAP_HEIGHT",
     "Rel X",
     "Rel Y",
+    "Abs X",
+    "Abs Y",
+    "Rel Vert Scroll",
     "WM_PROTOCOLS",
     "WM_DELETE_WINDOW",
     "WM_STATE",
@@ -611,6 +614,8 @@ void CDECL X11DRV_ThreadDetach(void)
 
     if (data)
     {
+        X11DRV_XInput2_Disable();
+
         if (data->xim) XCloseIM( data->xim );
         if (data->font_set) XFreeFontSet( data->display, data->font_set );
         XCloseDisplay( data->display );
@@ -680,6 +685,8 @@ struct x11drv_thread_data *x11drv_init_thread_data(void)
     TlsSetValue( thread_data_tls_index, data );
 
     if (use_xim) X11DRV_SetupXIM();
+
+    X11DRV_XInput2_Enable();
 
     return data;
 }

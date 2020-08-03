@@ -19,7 +19,6 @@
  */
 
 #include "quartz_private.h"
-#include "pin.h"
 
 #include "uuids.h"
 #include "vfwmsgs.h"
@@ -420,7 +419,7 @@ static void video_renderer_start_stream(BaseRenderer *iface)
 
     TRACE("(%p)\n", This);
 
-    if (This->renderer.sink.pin.pConnectedTo
+    if (This->renderer.sink.pin.peer
         && (This->renderer.filter.state == State_Stopped || !This->renderer.sink.end_of_stream))
     {
         if (This->renderer.filter.state == State_Stopped)

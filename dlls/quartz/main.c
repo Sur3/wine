@@ -69,8 +69,6 @@ static const struct object_creation_info object_creation[] =
     { &CLSID_FilterMapper2, FilterMapper2_create },
     { &CLSID_AsyncReader, AsyncReader_create },
     { &CLSID_MemoryAllocator, StdMemAllocator_create },
-    { &CLSID_AviSplitter, AVISplitter_create },
-    { &CLSID_MPEG1Splitter, MPEGSplitter_create },
     { &CLSID_VideoRenderer, VideoRenderer_create },
     { &CLSID_VideoMixingRenderer, VMR7Impl_create },
     { &CLSID_VideoMixingRenderer9, VMR9Impl_create },
@@ -80,7 +78,6 @@ static const struct object_creation_info object_creation[] =
     { &CLSID_AVIDec, AVIDec_create },
     { &CLSID_SystemClock, QUARTZ_CreateSystemClock },
     { &CLSID_ACMWrapper, ACMWrapper_create },
-    { &CLSID_WAVEParser, WAVEParser_create }
 };
 
 static HRESULT WINAPI DSCF_QueryInterface(IClassFactory *iface, REFIID riid, void **ppobj)

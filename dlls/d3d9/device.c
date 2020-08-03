@@ -603,6 +603,10 @@ static ULONG WINAPI DECLSPEC_HOTPATCH d3d9_device_Release(IDirect3DDevice9Ex *if
         }
         heap_free(device->implicit_swapchains);
 
+        if (device->recording)
+            wined3d_stateblock_decref(device->recording);
+        wined3d_stateblock_decref(device->state);
+
         wined3d_device_release_focus_window(device->wined3d_device);
         wined3d_device_decref(device->wined3d_device);
         wined3d_mutex_unlock();
@@ -993,7 +997,10 @@ static HRESULT d3d9_device_reset(struct d3d9_device *device,
 
         if (!extended)
         {
-            device->recording = FALSE;
+            if (device->recording)
+                wined3d_stateblock_decref(device->recording);
+            device->recording = NULL;
+            device->update_state = device->state;
             device->auto_mipmaps = 0;
             wined3d_device_set_render_state(device->wined3d_device, WINED3D_RS_ZENABLE,
                     !!swapchain_desc.enable_auto_depth_stencil);
@@ -2348,13 +2355,14 @@ static HRESULT WINAPI d3d9_device_CreateStateBlock(IDirect3DDevice9Ex *iface,
 static HRESULT WINAPI d3d9_device_BeginStateBlock(IDirect3DDevice9Ex *iface)
 {
     struct d3d9_device *device = impl_from_IDirect3DDevice9Ex(iface);
+    struct wined3d_stateblock *stateblock;
     HRESULT hr;
 
     TRACE("iface %p.\n", iface);
 
     wined3d_mutex_lock();
-    if (SUCCEEDED(hr = wined3d_device_begin_stateblock(device->wined3d_device)))
-        device->recording = TRUE;
+    if (SUCCEEDED(hr = wined3d_device_begin_stateblock(device->wined3d_device, &stateblock)))
+        device->update_state = device->recording = stateblock;
     wined3d_mutex_unlock();
 
     return hr;
@@ -2370,14 +2378,17 @@ static HRESULT WINAPI d3d9_device_EndStateBlock(IDirect3DDevice9Ex *iface, IDire
     TRACE("iface %p, stateblock %p.\n", iface, stateblock);
 
     wined3d_mutex_lock();
-    hr = wined3d_device_end_stateblock(device->wined3d_device, &wined3d_stateblock);
-    wined3d_mutex_unlock();
+    hr = wined3d_device_end_stateblock(device->wined3d_device);
     if (FAILED(hr))
     {
-       WARN("Failed to end the state block, hr %#x.\n", hr);
-       return hr;
+        wined3d_mutex_unlock();
+        WARN("Failed to end the stateblock, hr %#x.\n", hr);
+        return hr;
     }
-    device->recording = FALSE;
+    wined3d_stateblock = device->recording;
+    device->recording = NULL;
+    device->update_state = device->state;
+    wined3d_mutex_unlock();
 
     if (!(object = heap_alloc_zero(sizeof(*object))))
     {
@@ -3460,8 +3471,13 @@ static HRESULT WINAPI d3d9_device_SetVertexShaderConstantF(IDirect3DDevice9Ex *i
     }
 
     wined3d_mutex_lock();
-    hr = wined3d_device_set_vs_consts_f(device->wined3d_device,
-            reg_idx, count, (const struct wined3d_vec4 *)data);
+    hr = wined3d_stateblock_set_vs_consts_f(device->update_state, reg_idx,
+            count, (const struct wined3d_vec4 *)data);
+    if (SUCCEEDED(hr) && !device->recording)
+    {
+        hr = wined3d_device_set_vs_consts_f(device->wined3d_device,
+                reg_idx, count, (const struct wined3d_vec4 *)data);
+    }
     wined3d_mutex_unlock();
 
     return hr;
@@ -4488,6 +4504,15 @@ HRESULT device_init(struct d3d9_device *device, struct d3d9 *parent, struct wine
     device->max_user_clip_planes = caps.MaxUserClipPlanes;
     if (flags & D3DCREATE_ADAPTERGROUP_DEVICE)
         count = caps.NumberOfAdaptersInGroup;
+
+    if (FAILED(hr = wined3d_stateblock_create(device->wined3d_device, WINED3D_SBT_PRIMARY, &device->state)))
+    {
+        ERR("Failed to create the primary stateblock, hr %#x.\n", hr);
+        wined3d_device_decref(device->wined3d_device);
+        wined3d_mutex_unlock();
+        return hr;
+    }
+    device->update_state = device->state;
 
     if (flags & D3DCREATE_MULTITHREADED)
         wined3d_device_set_multithreaded(device->wined3d_device);

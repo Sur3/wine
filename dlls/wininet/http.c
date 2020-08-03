@@ -43,6 +43,7 @@
 #include <time.h>
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -51,7 +52,6 @@
 #include "winternl.h"
 #define NO_SHLWAPI_STREAM
 #define NO_SHLWAPI_REG
-#define NO_SHLWAPI_STRFCNS
 #define NO_SHLWAPI_GDI
 #include "shlwapi.h"
 #include "sspi.h"
@@ -853,7 +853,7 @@ static void destroy_authinfo( struct HttpAuthInfo *authinfo )
     heap_free(authinfo);
 }
 
-static UINT retrieve_cached_basic_authorization(const WCHAR *host, const WCHAR *realm, char **auth_data)
+static UINT retrieve_cached_basic_authorization(http_request_t *req, const WCHAR *host, const WCHAR *realm, char **auth_data)
 {
     basicAuthorizationData *ad;
     UINT rc = 0;
@@ -865,10 +865,24 @@ static UINT retrieve_cached_basic_authorization(const WCHAR *host, const WCHAR *
     {
         if (!strcmpiW(host, ad->host) && (!realm || !strcmpW(realm, ad->realm)))
         {
+            char *colon;
+            DWORD length;
+
             TRACE("Authorization found in cache\n");
             *auth_data = heap_alloc(ad->authorizationLen);
             memcpy(*auth_data,ad->authorization,ad->authorizationLen);
             rc = ad->authorizationLen;
+
+            /* update session username and password to reflect current credentials */
+            colon = strchr(ad->authorization, ':');
+            length = colon - ad->authorization;
+
+            heap_free(req->session->userName);
+            heap_free(req->session->password);
+
+            req->session->userName = heap_strndupAtoW(ad->authorization, length, &length);
+            length++;
+            req->session->password = heap_strndupAtoW(&ad->authorization[length], ad->authorizationLen - length, &length);
             break;
         }
     }
@@ -993,6 +1007,37 @@ static void cache_authorization(LPWSTR host, LPWSTR scheme,
 
     if(!ad->host || !ad->scheme || !ad->user || !ad->password
             || (nt_auth_identity->Domain && !ad->domain)) {
+        heap_free(ad->host);
+        heap_free(ad->scheme);
+        heap_free(ad->user);
+        heap_free(ad->password);
+        heap_free(ad->domain);
+        list_remove(&ad->entry);
+        heap_free(ad);
+    }
+
+    LeaveCriticalSection(&authcache_cs);
+}
+
+void free_authorization_cache(void)
+{
+    authorizationData *ad, *sa_safe;
+    basicAuthorizationData *basic, *basic_safe;
+
+    EnterCriticalSection(&authcache_cs);
+
+    LIST_FOR_EACH_ENTRY_SAFE(basic, basic_safe, &basicAuthorizationCache, basicAuthorizationData, entry)
+    {
+        heap_free(basic->host);
+        heap_free(basic->realm);
+        heap_free(basic->authorization);
+
+        list_remove(&basic->entry);
+        heap_free(basic);
+    }
+
+    LIST_FOR_EACH_ENTRY_SAFE(ad, sa_safe, &authorizationCache, authorizationData, entry)
+    {
         heap_free(ad->host);
         heap_free(ad->scheme);
         heap_free(ad->user);
@@ -1144,7 +1189,7 @@ static BOOL HTTP_DoAuthorization( http_request_t *request, LPCWSTR pszAuthValue,
         if (!domain_and_username)
         {
             if (host && szRealm)
-                auth_data_len = retrieve_cached_basic_authorization(host, szRealm,&auth_data);
+                auth_data_len = retrieve_cached_basic_authorization(request, host, szRealm,&auth_data);
             if (auth_data_len == 0)
             {
                 heap_free(szRealm);
@@ -1655,12 +1700,19 @@ static BOOL HTTP_InsertAuthorization( http_request_t *request, struct HttpAuthIn
                            HTTP_ADDHDR_FLAG_REQ | HTTP_ADDHDR_FLAG_REPLACE | HTTP_ADDREQ_FLAG_ADD);
         heap_free(authorization);
     }
-    else if (!strcmpW(header, szAuthorization) && (host = get_host_header(request)))
+    else
     {
         UINT data_len;
         char *data;
 
-        if ((data_len = retrieve_cached_basic_authorization(host, NULL, &data)))
+        /* Don't use cached credentials when a username or Authorization was specified */
+        if ((request->session->userName && request->session->userName[0]) || strcmpW(header, szAuthorization))
+            return TRUE;
+
+        if (!(host = get_host_header(request)))
+            return TRUE;
+
+        if ((data_len = retrieve_cached_basic_authorization(request, host, NULL, &data)))
         {
             TRACE("Found cached basic authorization for %s\n", debugstr_w(host));
 
@@ -2441,7 +2493,7 @@ static void create_cache_entry(http_request_t *req)
         return;
     }
 
-    b = CreateUrlCacheEntryW(url, req->contentLength == ~0u ? 0 : req->contentLength, NULL, file_name, 0);
+    b = CreateUrlCacheEntryW(url, req->contentLength == ~0 ? 0 : req->contentLength, NULL, file_name, 0);
     if(!b) {
         WARN("Could not create cache entry: %08x\n", GetLastError());
         return;
@@ -2645,7 +2697,7 @@ static DWORD netconn_drain_content(data_stream_t *stream, http_request_t *req, B
     int len, res;
     size_t size;
 
-    if(netconn_stream->content_length == ~0u)
+    if(netconn_stream->content_length == ~0)
         return WSAEISCONN;
 
     while(netconn_stream->content_read < netconn_stream->content_length) {
@@ -2751,7 +2803,7 @@ static DWORD chunked_read(data_stream_t *stream, http_request_t *req, BYTE *buf,
                 TRACE("reading %u byte chunk\n", chunked_stream->chunk_size);
                 chunked_stream->buf_size++;
                 chunked_stream->buf_pos--;
-                if(req->contentLength == ~0u) req->contentLength = chunked_stream->chunk_size;
+                if(req->contentLength == ~0) req->contentLength = chunked_stream->chunk_size;
                 else req->contentLength += chunked_stream->chunk_size;
                 chunked_stream->state = CHUNKED_STREAM_STATE_DISCARD_EOL_AFTER_SIZE;
             }
@@ -2873,6 +2925,7 @@ static DWORD set_content_length(http_request_t *request)
 {
     static const WCHAR szChunked[] = {'c','h','u','n','k','e','d',0};
     static const WCHAR headW[] = {'H','E','A','D',0};
+    WCHAR contentLength[32];
     WCHAR encoding[20];
     DWORD size;
 
@@ -2881,10 +2934,13 @@ static DWORD set_content_length(http_request_t *request)
         return ERROR_SUCCESS;
     }
 
-    size = sizeof(request->contentLength);
-    if (HTTP_HttpQueryInfoW(request, HTTP_QUERY_FLAG_NUMBER|HTTP_QUERY_CONTENT_LENGTH,
-                            &request->contentLength, &size, NULL) != ERROR_SUCCESS)
-        request->contentLength = ~0u;
+    size = sizeof(contentLength);
+    if (HTTP_HttpQueryInfoW(request, HTTP_QUERY_CONTENT_LENGTH,
+                            contentLength, &size, NULL) != ERROR_SUCCESS ||
+        !StrToInt64ExW(contentLength, STIF_DEFAULT, (LONGLONG*)&request->contentLength)) {
+        request->contentLength = ~0;
+    }
+
     request->netconn_stream.content_length = request->contentLength;
     request->netconn_stream.content_read = request->read_size;
 
@@ -2910,7 +2966,7 @@ static DWORD set_content_length(http_request_t *request)
         }
 
         request->data_stream = &chunked_stream->data_stream;
-        request->contentLength = ~0u;
+        request->contentLength = ~0;
     }
 
     if(request->hdr.decoding) {
@@ -3300,7 +3356,7 @@ static DWORD HTTP_HttpOpenRequestW(http_session_t *session,
     request->hdr.dwFlags = dwFlags;
     request->hdr.dwContext = dwContext;
     request->hdr.decoding = session->hdr.decoding;
-    request->contentLength = ~0u;
+    request->contentLength = ~0;
 
     request->netconn_stream.data_stream.vtbl = &netconn_stream_vtbl;
     request->data_stream = &request->netconn_stream.data_stream;
@@ -4924,7 +4980,7 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
         loop_next = FALSE;
 
         if(redirected) {
-            request->contentLength = ~0u;
+            request->contentLength = ~0;
             request->bytesToWrite = 0;
         }
 

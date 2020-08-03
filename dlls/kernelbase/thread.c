@@ -26,6 +26,7 @@
 #define NONAMELESSUNION
 #include "windef.h"
 #include "winbase.h"
+#include "winnls.h"
 #include "winternl.h"
 
 #include "kernelbase.h"
@@ -73,7 +74,6 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateRemoteThreadEx( HANDLE process, SECURITY_A
 {
     HANDLE handle;
     CLIENT_ID client_id;
-    NTSTATUS status;
     SIZE_T stack_reserve = 0, stack_commit = 0;
 
     if (attributes) FIXME("thread attributes ignored\n");
@@ -81,29 +81,23 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateRemoteThreadEx( HANDLE process, SECURITY_A
     if (flags & STACK_SIZE_PARAM_IS_A_RESERVATION) stack_reserve = stack;
     else stack_commit = stack;
 
-    status = RtlCreateUserThread( process, sa ? sa->lpSecurityDescriptor : NULL, TRUE,
-                                  NULL, stack_reserve, stack_commit,
-                                  (PRTL_THREAD_START_ROUTINE)start, param, &handle, &client_id );
-    if (status == STATUS_SUCCESS)
+    if (!set_ntstatus( RtlCreateUserThread( process, sa ? sa->lpSecurityDescriptor : NULL, TRUE,
+                                            NULL, stack_reserve, stack_commit,
+                                            (PRTL_THREAD_START_ROUTINE)start, param, &handle, &client_id )))
+        return 0;
+
+    if (id) *id = HandleToULong( client_id.UniqueThread );
+    if (sa && sa->nLength >= sizeof(*sa) && sa->bInheritHandle)
+        SetHandleInformation( handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+    if (!(flags & CREATE_SUSPENDED))
     {
-        if (id) *id = HandleToULong( client_id.UniqueThread );
-        if (sa && sa->nLength >= sizeof(*sa) && sa->bInheritHandle)
-            SetHandleInformation( handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
-        if (!(flags & CREATE_SUSPENDED))
+        ULONG ret;
+        if (NtResumeThread( handle, &ret ))
         {
-            ULONG ret;
-            if (NtResumeThread( handle, &ret ))
-            {
-                NtClose( handle );
-                SetLastError( ERROR_NOT_ENOUGH_MEMORY );
-                handle = 0;
-            }
+            NtClose( handle );
+            SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+            handle = 0;
         }
-    }
-    else
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        handle = 0;
     }
     return handle;
 }
@@ -249,6 +243,17 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetThreadId( HANDLE thread )
 }
 
 
+/***********************************************************************
+ *	GetThreadLocale   (kernelbase.@)
+ */
+LCID WINAPI /* DECLSPEC_HOTPATCH */ GetThreadLocale(void)
+{
+    LCID ret = NtCurrentTeb()->CurrentLocale;
+    if (!ret) NtCurrentTeb()->CurrentLocale = ret = GetUserDefaultLCID();
+    return ret;
+}
+
+
 /**********************************************************************
  *           GetThreadPriority   (kernelbase.@)
  */
@@ -280,12 +285,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetThreadTimes( HANDLE thread, LPFILETIME creation
                                               LPFILETIME kerneltime, LPFILETIME usertime )
 {
     KERNEL_USER_TIMES times;
-    NTSTATUS status = NtQueryInformationThread( thread, ThreadTimes, &times, sizeof(times), NULL);
-    if (status)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
+
+    if (!set_ntstatus( NtQueryInformationThread( thread, ThreadTimes, &times, sizeof(times), NULL )))
         return FALSE;
-    }
+
     if (creationtime)
     {
         creationtime->dwLowDateTime = times.CreateTime.u.LowPart;
@@ -447,6 +450,25 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessorEx( HANDLE thread, PROCESSO
 
 
 /**********************************************************************
+ *	SetThreadLocale   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetThreadLocale( LCID lcid )
+{
+    lcid = ConvertDefaultLocale( lcid );
+    if (lcid != GetThreadLocale())
+    {
+        if (!IsValidLocale( lcid, LCID_SUPPORTED ))
+        {
+            SetLastError( ERROR_INVALID_PARAMETER );
+            return FALSE;
+        }
+        NtCurrentTeb()->CurrentLocale = lcid;
+    }
+    return TRUE;
+}
+
+
+/**********************************************************************
  *           SetThreadPriority   (kernelbase.@)
  */
 BOOL WINAPI DECLSPEC_HOTPATCH SetThreadPriority( HANDLE thread, INT priority )
@@ -474,7 +496,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadStackGuarantee( ULONG *size )
     ULONG new_size = (*size + 4095) & ~4095;
 
     /* at least 2 pages on 64-bit */
-    if (sizeof(void *) > sizeof(int)) new_size = max( new_size, 8192 );
+    if (sizeof(void *) > sizeof(int) && new_size) new_size = max( new_size, 8192 );
 
     *size = prev_size;
     if (new_size >= (char *)NtCurrentTeb()->Tib.StackBase - (char *)NtCurrentTeb()->DeallocationStack)
@@ -484,6 +506,18 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadStackGuarantee( ULONG *size )
     }
     if (new_size > prev_size) NtCurrentTeb()->GuaranteedStackBytes = (new_size + 4095) & ~4095;
     return TRUE;
+}
+
+
+/**********************************************************************
+ *	SetThreadUILanguage   (kernelbase.@)
+ */
+LANGID WINAPI DECLSPEC_HOTPATCH SetThreadUILanguage( LANGID langid )
+{
+    TRACE( "(0x%04x) stub - returning success\n", langid );
+
+    if (!langid) langid = GetThreadUILanguage();
+    return langid;
 }
 
 
@@ -814,7 +848,6 @@ LPVOID WINAPI DECLSPEC_HOTPATCH CreateFiberEx( SIZE_T stack_commit, SIZE_T stack
 {
     struct fiber_data *fiber;
     INITIAL_TEB stack;
-    NTSTATUS status;
 
     if (!(fiber = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*fiber) )))
     {
@@ -822,9 +855,9 @@ LPVOID WINAPI DECLSPEC_HOTPATCH CreateFiberEx( SIZE_T stack_commit, SIZE_T stack
         return NULL;
     }
 
-    if ((status = RtlCreateUserStack( stack_commit, stack_reserve, 0, 1, 1, &stack )))
+    if (!set_ntstatus( RtlCreateUserStack( stack_commit, stack_reserve, 0, 1, 1, &stack )))
     {
-        SetLastError( RtlNtStatusToDosError(status) );
+        HeapFree( GetProcessHeap(), 0, fiber );
         return NULL;
     }
 

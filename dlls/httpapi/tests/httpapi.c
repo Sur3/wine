@@ -74,7 +74,7 @@ static const char simple_req[] =
     "User-Agent: WINE\r\n"
     "\r\n";
 
-static int create_client_socket(void)
+static SOCKET create_client_socket(void)
 {
     struct sockaddr_in sockaddr =
     {
@@ -82,7 +82,7 @@ static int create_client_socket(void)
         .sin_port = htons(50000),
         .sin_addr.S_un.S_addr = inet_addr("127.0.0.1"),
     };
-    int s = socket(AF_INET, SOCK_STREAM, 0), ret;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0), ret;
     ret = connect(s, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
     ok(!ret, "Failed to connect socket, error %u.\n", GetLastError());
     return s;
@@ -534,6 +534,8 @@ static void test_v1_short_buffer(void)
     ok(!ret, "Got error %u.\n", ret);
     ok(req->RequestId == req_id, "Got request ID %s.\n", wine_dbgstr_longlong(req->RequestId));
 
+    CancelIo(queue);
+
     ret = HttpRemoveUrl(queue, localhost_urlW);
     ok(!ret, "Got error %u.\n", ret);
     closesocket(s);
@@ -613,6 +615,8 @@ static void test_v1_entity_body(void)
     chunks[1].FromMemory.BufferLength = 4;
     ret = HttpSendHttpResponse(queue, req->RequestId, 0, (HTTP_RESPONSE *)&response, NULL, NULL, NULL, 0, NULL, NULL);
     ok(!ret, "Got error %u.\n", ret);
+
+    memset(response_buffer, 0, sizeof(response_buffer));
 
     ret = recv(s, response_buffer, sizeof(response_buffer), 0);
     ok(ret > 0, "recv() failed.\n");

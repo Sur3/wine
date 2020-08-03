@@ -36,6 +36,7 @@ enum session_command
 {
     SESSION_CMD_CLEAR_TOPOLOGIES,
     SESSION_CMD_CLOSE,
+    SESSION_CMD_SET_TOPOLOGY,
 };
 
 struct session_op
@@ -43,6 +44,14 @@ struct session_op
     IUnknown IUnknown_iface;
     LONG refcount;
     enum session_command command;
+    union
+    {
+        struct
+        {
+            DWORD flags;
+            IMFTopology *topology;
+        } set_topology;
+    } u;
 };
 
 struct queued_topology
@@ -69,6 +78,9 @@ struct media_session
     IMFMediaEventQueue *event_queue;
     IMFPresentationClock *clock;
     IMFRateControl *clock_rate_control;
+    IMFTopoLoader *topo_loader;
+    IMFQualityManager *quality_manager;
+    IMFTopology *current_topology;
     struct list topologies;
     enum session_state state;
     CRITICAL_SECTION cs;
@@ -133,6 +145,12 @@ struct presentation_clock
     CRITICAL_SECTION cs;
 };
 
+struct quality_manager
+{
+    IMFQualityManager IMFQualityManager_iface;
+    LONG refcount;
+};
+
 static inline struct media_session *impl_from_IMFMediaSession(IMFMediaSession *iface)
 {
     return CONTAINING_RECORD(iface, struct media_session, IMFMediaSession_iface);
@@ -193,6 +211,11 @@ static struct sink_notification *impl_from_IUnknown(IUnknown *iface)
     return CONTAINING_RECORD(iface, struct sink_notification, IUnknown_iface);
 }
 
+static struct quality_manager *impl_from_IMFQualityManager(IMFQualityManager *iface)
+{
+    return CONTAINING_RECORD(iface, struct quality_manager, IMFQualityManager_iface);
+}
+
 static HRESULT WINAPI session_op_QueryInterface(IUnknown *iface, REFIID riid, void **obj)
 {
     if (IsEqualIID(riid, &IID_IUnknown))
@@ -225,6 +248,11 @@ static ULONG WINAPI session_op_Release(IUnknown *iface)
 
     if (!refcount)
     {
+        if (op->command == SESSION_CMD_SET_TOPOLOGY)
+        {
+            if (op->u.set_topology.topology)
+                IMFTopology_Release(op->u.set_topology.topology);
+        }
         heap_free(op);
     }
 
@@ -238,7 +266,7 @@ static IUnknownVtbl session_op_vtbl =
     session_op_Release,
 };
 
-static HRESULT create_session_op(enum session_command command, IUnknown **ret)
+static HRESULT create_session_op(enum session_command command, struct session_op **ret)
 {
     struct session_op *op;
 
@@ -249,9 +277,23 @@ static HRESULT create_session_op(enum session_command command, IUnknown **ret)
     op->refcount = 1;
     op->command = command;
 
-    *ret = &op->IUnknown_iface;
+    *ret = op;
 
     return S_OK;
+}
+
+static HRESULT session_submit_command(struct media_session *session, struct session_op *op)
+{
+    HRESULT hr;
+
+    EnterCriticalSection(&session->cs);
+    if (session->state == SESSION_STATE_SHUT_DOWN)
+        hr = MF_E_SHUTDOWN;
+    else
+        hr = MFPutWorkItem(MFASYNC_CALLBACK_QUEUE_STANDARD, &session->commands_callback, &op->IUnknown_iface);
+    LeaveCriticalSection(&session->cs);
+
+    return hr;
 }
 
 static void session_clear_topologies(struct media_session *session)
@@ -264,6 +306,68 @@ static void session_clear_topologies(struct media_session *session)
         IMFTopology_Release(ptr->topology);
         heap_free(ptr);
     }
+}
+
+static HRESULT session_bind_output_nodes(IMFTopology *topology)
+{
+    MF_TOPOLOGY_TYPE node_type;
+    IMFStreamSink *stream_sink;
+    IMFMediaSink *media_sink;
+    WORD node_count = 0, i;
+    IMFTopologyNode *node;
+    IMFActivate *activate;
+    UINT32 stream_id;
+    IUnknown *object;
+    HRESULT hr;
+
+    hr = IMFTopology_GetNodeCount(topology, &node_count);
+
+    for (i = 0; i < node_count; ++i)
+    {
+        if (FAILED(hr = IMFTopology_GetNode(topology, i, &node)))
+            break;
+
+        if (FAILED(hr = IMFTopologyNode_GetNodeType(node, &node_type)) || node_type != MF_TOPOLOGY_OUTPUT_NODE)
+        {
+            IMFTopologyNode_Release(node);
+            break;
+        }
+
+        if (SUCCEEDED(hr = IMFTopologyNode_GetObject(node, &object)))
+        {
+            stream_sink = NULL;
+            if (FAILED(IUnknown_QueryInterface(object, &IID_IMFStreamSink, (void **)&stream_sink)))
+            {
+                if (SUCCEEDED(hr = IUnknown_QueryInterface(object, &IID_IMFActivate, (void **)&activate)))
+                {
+                    if (SUCCEEDED(hr = IMFActivate_ActivateObject(activate, &IID_IMFMediaSink, (void **)&media_sink)))
+                    {
+                        if (FAILED(IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_STREAMID, &stream_id)))
+                            stream_id = 0;
+
+                        stream_sink = NULL;
+                        if (FAILED(IMFMediaSink_GetStreamSinkById(media_sink, stream_id, &stream_sink)))
+                            hr = IMFMediaSink_AddStreamSink(media_sink, stream_id, NULL, &stream_sink);
+
+                        if (stream_sink)
+                            hr = IMFTopologyNode_SetObject(node, (IUnknown *)stream_sink);
+
+                        IMFMediaSink_Release(media_sink);
+                    }
+
+                    IMFActivate_Release(activate);
+                }
+            }
+
+            if (stream_sink)
+                IMFStreamSink_Release(stream_sink);
+            IUnknown_Release(object);
+        }
+
+        IMFTopologyNode_Release(node);
+    }
+
+    return hr;
 }
 
 static HRESULT WINAPI mfsession_QueryInterface(IMFMediaSession *iface, REFIID riid, void **out)
@@ -312,12 +416,18 @@ static ULONG WINAPI mfsession_Release(IMFMediaSession *iface)
     if (!refcount)
     {
         session_clear_topologies(session);
+        if (session->current_topology)
+            IMFTopology_Release(session->current_topology);
         if (session->event_queue)
             IMFMediaEventQueue_Release(session->event_queue);
         if (session->clock)
             IMFPresentationClock_Release(session->clock);
         if (session->clock_rate_control)
             IMFRateControl_Release(session->clock_rate_control);
+        if (session->topo_loader)
+            IMFTopoLoader_Release(session->topo_loader);
+        if (session->quality_manager)
+            IMFQualityManager_Release(session->quality_manager);
         DeleteCriticalSection(&session->cs);
         heap_free(session);
     }
@@ -365,33 +475,28 @@ static HRESULT WINAPI mfsession_QueueEvent(IMFMediaSession *iface, MediaEventTyp
 static HRESULT WINAPI mfsession_SetTopology(IMFMediaSession *iface, DWORD flags, IMFTopology *topology)
 {
     struct media_session *session = impl_from_IMFMediaSession(iface);
-    struct queued_topology *queued_topology;
-
-    FIXME("%p, %#x, %p.\n", iface, flags, topology);
-
-    if (!(queued_topology = heap_alloc(sizeof(*queued_topology))))
-        return E_OUTOFMEMORY;
-
-    queued_topology->topology = topology;
-    IMFTopology_AddRef(queued_topology->topology);
-
-    EnterCriticalSection(&session->cs);
-    list_add_tail(&session->topologies, &queued_topology->entry);
-    LeaveCriticalSection(&session->cs);
-
-    return S_OK;
-}
-
-static HRESULT session_submit_command(struct media_session *session, IUnknown *op)
-{
+    struct session_op *op;
+    WORD node_count = 0;
     HRESULT hr;
 
-    EnterCriticalSection(&session->cs);
-    if (session->state == SESSION_STATE_SHUT_DOWN)
-        hr = MF_E_SHUTDOWN;
-    else
-        hr = MFPutWorkItem(MFASYNC_CALLBACK_QUEUE_STANDARD, &session->commands_callback, op);
-    LeaveCriticalSection(&session->cs);
+    TRACE("%p, %#x, %p.\n", iface, flags, topology);
+
+    if (topology)
+    {
+        if (FAILED(IMFTopology_GetNodeCount(topology, &node_count)) || node_count == 0)
+            return E_INVALIDARG;
+    }
+
+    if (FAILED(hr = create_session_op(SESSION_CMD_SET_TOPOLOGY, &op)))
+        return hr;
+
+    op->u.set_topology.flags = flags;
+    op->u.set_topology.topology = topology;
+    if (op->u.set_topology.topology)
+        IMFTopology_AddRef(op->u.set_topology.topology);
+
+    hr = session_submit_command(session, op);
+    IUnknown_Release(&op->IUnknown_iface);
 
     return hr;
 }
@@ -399,7 +504,7 @@ static HRESULT session_submit_command(struct media_session *session, IUnknown *o
 static HRESULT WINAPI mfsession_ClearTopologies(IMFMediaSession *iface)
 {
     struct media_session *session = impl_from_IMFMediaSession(iface);
-    IUnknown *op;
+    struct session_op *op;
     HRESULT hr;
 
     TRACE("%p.\n", iface);
@@ -408,7 +513,7 @@ static HRESULT WINAPI mfsession_ClearTopologies(IMFMediaSession *iface)
         return hr;
 
     hr = session_submit_command(session, op);
-    IUnknown_Release(op);
+    IUnknown_Release(&op->IUnknown_iface);
 
     return hr;
 }
@@ -437,7 +542,7 @@ static HRESULT WINAPI mfsession_Stop(IMFMediaSession *iface)
 static HRESULT WINAPI mfsession_Close(IMFMediaSession *iface)
 {
     struct media_session *session = impl_from_IMFMediaSession(iface);
-    IUnknown *op;
+    struct session_op *op;
     HRESULT hr;
 
     TRACE("(%p)\n", iface);
@@ -446,7 +551,7 @@ static HRESULT WINAPI mfsession_Close(IMFMediaSession *iface)
         return hr;
 
     hr = session_submit_command(session, op);
-    IUnknown_Release(op);
+    IUnknown_Release(&op->IUnknown_iface);
 
     return hr;
 }
@@ -610,6 +715,7 @@ static HRESULT WINAPI session_commands_callback_Invoke(IMFAsyncCallback *iface, 
 {
     struct session_op *op = impl_op_from_IUnknown(IMFAsyncResult_GetStateNoAddRef(result));
     struct media_session *session = impl_from_commands_callback_IMFAsyncCallback(iface);
+    HRESULT status = S_OK;
 
     switch (op->command)
     {
@@ -621,6 +727,98 @@ static HRESULT WINAPI session_commands_callback_Invoke(IMFAsyncCallback *iface, 
             IMFMediaEventQueue_QueueEventParamVar(session->event_queue, MESessionTopologiesCleared, &GUID_NULL,
                     S_OK, NULL);
             break;
+        case SESSION_CMD_SET_TOPOLOGY:
+        {
+            IMFTopology *topology = op->u.set_topology.topology;
+            MF_TOPOSTATUS topo_status = MF_TOPOSTATUS_INVALID;
+            struct queued_topology *queued_topology;
+            DWORD flags = op->u.set_topology.flags;
+            PROPVARIANT param;
+
+            if (flags & MFSESSION_SETTOPOLOGY_CLEAR_CURRENT)
+            {
+                EnterCriticalSection(&session->cs);
+                if ((topology && topology == session->current_topology) || !topology)
+                {
+                    /* FIXME: stop current topology, queue next one. */
+                    if (session->current_topology)
+                    {
+                        IMFTopology_Release(session->current_topology);
+                        session->current_topology = NULL;
+                    }
+                }
+                else
+                    status = S_FALSE;
+                topo_status = MF_TOPOSTATUS_READY;
+                LeaveCriticalSection(&session->cs);
+            }
+            else if (topology)
+            {
+                /* Resolve unless claimed to be full. */
+                if (!(flags & MFSESSION_SETTOPOLOGY_NORESOLUTION))
+                {
+                    IMFTopology *resolved_topology = NULL;
+
+                    status = session_bind_output_nodes(topology);
+
+                    if (SUCCEEDED(status))
+                        status = IMFTopoLoader_Load(session->topo_loader, topology, &resolved_topology, NULL /* FIXME? */);
+
+                    if (SUCCEEDED(status))
+                        topology = resolved_topology;
+                }
+
+                if (SUCCEEDED(status))
+                {
+                    if (!(queued_topology = heap_alloc_zero(sizeof(*queued_topology))))
+                        status = E_OUTOFMEMORY;
+                    else
+                    {
+                        EnterCriticalSection(&session->cs);
+
+                        if (flags & MFSESSION_SETTOPOLOGY_IMMEDIATE)
+                        {
+                            session_clear_topologies(session);
+                            if (session->current_topology)
+                            {
+                                IMFTopology_Release(session->current_topology);
+                                session->current_topology = NULL;
+                            }
+                        }
+
+                        queued_topology->topology = topology;
+                        IMFTopology_AddRef(queued_topology->topology);
+                        list_add_tail(&session->topologies, &queued_topology->entry);
+
+                        LeaveCriticalSection(&session->cs);
+                    }
+                }
+            }
+
+            if (topology)
+            {
+                param.vt = VT_UNKNOWN;
+                param.punkVal = (IUnknown *)topology;
+            }
+            else
+                param.vt = VT_EMPTY;
+
+            IMFMediaEventQueue_QueueEventParamVar(session->event_queue, MESessionTopologySet, &GUID_NULL,
+                    status, &param);
+            if (topo_status != MF_TOPOSTATUS_INVALID)
+            {
+                IMFMediaEvent *event;
+
+                if (SUCCEEDED(MFCreateMediaEvent(MESessionTopologyStatus, &GUID_NULL, status, &param, &event)))
+                {
+                    IMFMediaEvent_SetUINT32(event, &MF_EVENT_TOPOLOGY_STATUS, topo_status);
+                    IMFMediaEventQueue_QueueEvent(session->event_queue, event);
+                    IMFMediaEvent_Release(event);
+                }
+            }
+
+            break;
+        }
         case SESSION_CMD_CLOSE:
             EnterCriticalSection(&session->cs);
             if (session->state != SESSION_STATE_CLOSED)
@@ -747,13 +945,11 @@ static const IMFRateControlVtbl session_rate_control_vtbl =
  */
 HRESULT WINAPI MFCreateMediaSession(IMFAttributes *config, IMFMediaSession **session)
 {
+    BOOL without_quality_manager = FALSE;
     struct media_session *object;
     HRESULT hr;
 
-    TRACE("(%p, %p)\n", config, session);
-
-    if (config)
-        FIXME("session configuration ignored\n");
+    TRACE("%p, %p.\n", config, session);
 
     object = heap_alloc_zero(sizeof(*object));
     if (!object)
@@ -776,6 +972,41 @@ HRESULT WINAPI MFCreateMediaSession(IMFAttributes *config, IMFMediaSession **ses
 
     if (FAILED(hr = IMFPresentationClock_QueryInterface(object->clock, &IID_IMFRateControl,
             (void **)&object->clock_rate_control)))
+    {
+        goto failed;
+    }
+
+    if (config)
+    {
+        GUID clsid;
+
+        if (SUCCEEDED(IMFAttributes_GetGUID(config, &MF_SESSION_TOPOLOADER, &clsid)))
+        {
+            if (FAILED(hr = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTopoLoader,
+                    (void **)&object->topo_loader)))
+            {
+                WARN("Failed to create custom topology loader, hr %#x.\n", hr);
+            }
+        }
+
+        if (SUCCEEDED(IMFAttributes_GetGUID(config, &MF_SESSION_QUALITY_MANAGER, &clsid)))
+        {
+            if (!(without_quality_manager = IsEqualGUID(&clsid, &GUID_NULL)))
+            {
+                if (FAILED(hr = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_SERVER, &IID_IMFQualityManager,
+                        (void **)&object->quality_manager)))
+                {
+                    WARN("Failed to create custom quality manager, hr %#x.\n", hr);
+                }
+            }
+        }
+    }
+
+    if (!object->topo_loader && FAILED(hr = MFCreateTopoLoader(&object->topo_loader)))
+        goto failed;
+
+    if (!object->quality_manager && !without_quality_manager &&
+            FAILED(hr = MFCreateStandardQualityManager(&object->quality_manager)))
     {
         goto failed;
     }
@@ -1539,6 +1770,125 @@ HRESULT WINAPI MFCreatePresentationClock(IMFPresentationClock **clock)
     InitializeCriticalSection(&object->cs);
 
     *clock = &object->IMFPresentationClock_iface;
+
+    return S_OK;
+}
+
+static HRESULT WINAPI standard_quality_manager_QueryInterface(IMFQualityManager *iface, REFIID riid, void **out)
+{
+    TRACE("%p, %s, %p.\n", iface, debugstr_guid(riid), out);
+
+    if (IsEqualIID(riid, &IID_IMFQualityManager) ||
+            IsEqualIID(riid, &IID_IUnknown))
+    {
+        *out = iface;
+        IMFQualityManager_AddRef(iface);
+        return S_OK;
+    }
+
+    WARN("Unsupported %s.\n", debugstr_guid(riid));
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI standard_quality_manager_AddRef(IMFQualityManager *iface)
+{
+    struct quality_manager *manager = impl_from_IMFQualityManager(iface);
+    ULONG refcount = InterlockedIncrement(&manager->refcount);
+
+    TRACE("%p, refcount %u.\n", iface, refcount);
+
+    return refcount;
+}
+
+static ULONG WINAPI standard_quality_manager_Release(IMFQualityManager *iface)
+{
+    struct quality_manager *manager = impl_from_IMFQualityManager(iface);
+    ULONG refcount = InterlockedDecrement(&manager->refcount);
+
+    TRACE("%p, refcount %u.\n", iface, refcount);
+
+    if (!refcount)
+    {
+        heap_free(manager);
+    }
+
+    return refcount;
+}
+
+static HRESULT WINAPI standard_quality_manager_NotifyTopology(IMFQualityManager *iface, IMFTopology *topology)
+{
+    FIXME("%p, %p stub.\n", iface, topology);
+
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI standard_quality_manager_NotifyPresentationClock(IMFQualityManager *iface,
+        IMFPresentationClock *clock)
+{
+    FIXME("%p, %p stub.\n", iface, clock);
+
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI standard_quality_manager_NotifyProcessInput(IMFQualityManager *iface, IMFTopologyNode *node,
+        LONG input_index, IMFSample *sample)
+{
+    FIXME("%p, %p, %d, %p stub.\n", iface, node, input_index, sample);
+
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI standard_quality_manager_NotifyProcessOutput(IMFQualityManager *iface, IMFTopologyNode *node,
+        LONG output_index, IMFSample *sample)
+{
+    FIXME("%p, %p, %d, %p stub.\n", iface, node, output_index, sample);
+
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI standard_quality_manager_NotifyQualityEvent(IMFQualityManager *iface, IUnknown *object,
+        IMFMediaEvent *event)
+{
+    FIXME("%p, %p, %p stub.\n", iface, object, event);
+
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI standard_quality_manager_Shutdown(IMFQualityManager *iface)
+{
+    FIXME("%p stub.\n", iface);
+
+    return E_NOTIMPL;
+}
+
+static IMFQualityManagerVtbl standard_quality_manager_vtbl =
+{
+    standard_quality_manager_QueryInterface,
+    standard_quality_manager_AddRef,
+    standard_quality_manager_Release,
+    standard_quality_manager_NotifyTopology,
+    standard_quality_manager_NotifyPresentationClock,
+    standard_quality_manager_NotifyProcessInput,
+    standard_quality_manager_NotifyProcessOutput,
+    standard_quality_manager_NotifyQualityEvent,
+    standard_quality_manager_Shutdown,
+};
+
+HRESULT WINAPI MFCreateStandardQualityManager(IMFQualityManager **manager)
+{
+    struct quality_manager *object;
+
+    TRACE("%p.\n", manager);
+
+    object = heap_alloc_zero(sizeof(*object));
+    if (!object)
+        return E_OUTOFMEMORY;
+
+    object->IMFQualityManager_iface.lpVtbl = &standard_quality_manager_vtbl;
+    object->refcount = 1;
+
+    *manager = &object->IMFQualityManager_iface;
 
     return S_OK;
 }

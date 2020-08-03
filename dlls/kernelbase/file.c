@@ -35,6 +35,7 @@
 #include "wincon.h"
 #include "fileapi.h"
 #include "ddk/ntddk.h"
+#include "ddk/ntddser.h"
 
 #include "kernelbase.h"
 #include "wine/exception.h"
@@ -480,6 +481,89 @@ BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileW( LPCWSTR path )
 }
 
 
+/****************************************************************************
+ *	FindCloseChangeNotification   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH FindCloseChangeNotification( HANDLE handle )
+{
+    return CloseHandle( handle );
+}
+
+
+/****************************************************************************
+ *	FindFirstChangeNotificationA   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstChangeNotificationA( LPCSTR path, BOOL subtree, DWORD filter )
+{
+    WCHAR *pathW;
+
+    if (!(pathW = file_name_AtoW( path, FALSE ))) return INVALID_HANDLE_VALUE;
+    return FindFirstChangeNotificationW( pathW, subtree, filter );
+}
+
+
+/*
+ * NtNotifyChangeDirectoryFile may write back to the IO_STATUS_BLOCK
+ * asynchronously.  We don't care about the contents, but it can't
+ * be placed on the stack since it will go out of scope when we return.
+ */
+static IO_STATUS_BLOCK dummy_iosb;
+
+/****************************************************************************
+ *	FindFirstChangeNotificationW   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstChangeNotificationW( LPCWSTR path, BOOL subtree, DWORD filter )
+{
+    UNICODE_STRING nt_name;
+    OBJECT_ATTRIBUTES attr;
+    NTSTATUS status;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+
+    TRACE( "%s %d %x\n", debugstr_w(path), subtree, filter );
+
+    if (!RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL ))
+    {
+        SetLastError( ERROR_PATH_NOT_FOUND );
+        return handle;
+    }
+
+    attr.Length = sizeof(attr);
+    attr.RootDirectory = 0;
+    attr.Attributes = OBJ_CASE_INSENSITIVE;
+    attr.ObjectName = &nt_name;
+    attr.SecurityDescriptor = NULL;
+    attr.SecurityQualityOfService = NULL;
+
+    status = NtOpenFile( &handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attr, &dummy_iosb,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    RtlFreeUnicodeString( &nt_name );
+
+    if (!set_ntstatus( status )) return INVALID_HANDLE_VALUE;
+
+    status = NtNotifyChangeDirectoryFile( handle, NULL, NULL, NULL, &dummy_iosb, NULL, 0, filter, subtree );
+    if (status != STATUS_PENDING)
+    {
+        NtClose( handle );
+        SetLastError( RtlNtStatusToDosError(status) );
+        return INVALID_HANDLE_VALUE;
+    }
+    return handle;
+}
+
+
+/****************************************************************************
+ *	FindNextChangeNotification   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH FindNextChangeNotification( HANDLE handle )
+{
+    NTSTATUS status = NtNotifyChangeDirectoryFile( handle, NULL, NULL, NULL, &dummy_iosb,
+                                                   NULL, 0, FILE_NOTIFY_CHANGE_SIZE, 0 );
+    if (status == STATUS_PENDING) return TRUE;
+    return set_ntstatus( status );
+}
+
+
 /******************************************************************************
  *	GetCompressedFileSizeA   (kernelbase.@)
  */
@@ -527,6 +611,45 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetCompressedFileSizeW( LPCWSTR name, LPDWORD siz
     ret = GetFileSize( handle, size_high );
     NtClose( handle );
     return ret;
+}
+
+
+/***********************************************************************
+ *           GetCurrentDirectoryA    (kernelbase.@)
+ */
+UINT WINAPI DECLSPEC_HOTPATCH GetCurrentDirectoryA( UINT buflen, LPSTR buf )
+{
+    WCHAR bufferW[MAX_PATH];
+    DWORD ret;
+
+    if (buflen && buf && ((ULONG_PTR)buf >> 16) == 0)
+    {
+        /* Win9x catches access violations here, returning zero.
+         * This behaviour resulted in some people not noticing
+         * that they got the argument order wrong. So let's be
+         * nice and fail gracefully if buf is invalid and looks
+         * more like a buflen. */
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+
+    ret = RtlGetCurrentDirectory_U( sizeof(bufferW), bufferW );
+    if (!ret) return 0;
+    if (ret > sizeof(bufferW))
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    return copy_filename_WtoA( bufferW, buf, buflen );
+}
+
+
+/***********************************************************************
+ *           GetCurrentDirectoryW    (kernelbase.@)
+ */
+UINT WINAPI DECLSPEC_HOTPATCH GetCurrentDirectoryW( UINT buflen, LPWSTR buf )
+{
+    return RtlGetCurrentDirectory_U( buflen * sizeof(WCHAR), buf ) / sizeof(WCHAR);
 }
 
 
@@ -642,6 +765,308 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileAttributesExW( LPCWSTR name, GET_FILEEX_INF
 
 
 /***********************************************************************
+ *	GetFullPathNameA   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetFullPathNameA( LPCSTR name, DWORD len, LPSTR buffer, LPSTR *lastpart )
+{
+    WCHAR *nameW;
+    WCHAR bufferW[MAX_PATH], *lastpartW = NULL;
+    DWORD ret;
+
+    if (!(nameW = file_name_AtoW( name, FALSE ))) return 0;
+
+    ret = GetFullPathNameW( nameW, MAX_PATH, bufferW, &lastpartW );
+
+    if (!ret) return 0;
+    if (ret > MAX_PATH)
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    ret = copy_filename_WtoA( bufferW, buffer, len );
+    if (ret < len && lastpart)
+    {
+        if (lastpartW)
+            *lastpart = buffer + file_name_WtoA( bufferW, lastpartW - bufferW, NULL, 0 );
+        else
+            *lastpart = NULL;
+    }
+    return ret;
+}
+
+
+/***********************************************************************
+ *	GetFullPathNameW   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetFullPathNameW( LPCWSTR name, DWORD len, LPWSTR buffer, LPWSTR *lastpart )
+{
+    return RtlGetFullPathName_U( name, len * sizeof(WCHAR), buffer, lastpart ) / sizeof(WCHAR);
+}
+
+
+/***********************************************************************
+ *	GetLongPathNameA   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetLongPathNameA( LPCSTR shortpath, LPSTR longpath, DWORD longlen )
+{
+    WCHAR *shortpathW;
+    WCHAR longpathW[MAX_PATH];
+    DWORD ret;
+
+    TRACE( "%s\n", debugstr_a( shortpath ));
+
+    if (!(shortpathW = file_name_AtoW( shortpath, FALSE ))) return 0;
+
+    ret = GetLongPathNameW( shortpathW, longpathW, MAX_PATH );
+
+    if (!ret) return 0;
+    if (ret > MAX_PATH)
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    return copy_filename_WtoA( longpathW, longpath, longlen );
+}
+
+
+/***********************************************************************
+ *	GetLongPathNameW   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetLongPathNameW( LPCWSTR shortpath, LPWSTR longpath, DWORD longlen )
+{
+    static const WCHAR wildcardsW[] = {'*','?',0};
+    WCHAR tmplongpath[1024];
+    DWORD sp = 0, lp = 0, tmplen;
+    WIN32_FIND_DATAW wfd;
+    UNICODE_STRING nameW;
+    LPCWSTR p;
+    HANDLE handle;
+
+    TRACE("%s,%p,%u\n", debugstr_w(shortpath), longpath, longlen);
+
+    if (!shortpath)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+    if (!shortpath[0])
+    {
+        SetLastError( ERROR_PATH_NOT_FOUND );
+        return 0;
+    }
+
+    if (shortpath[0] == '\\' && shortpath[1] == '\\')
+    {
+        FIXME( "UNC pathname %s\n", debugstr_w(shortpath) );
+        tmplen = lstrlenW( shortpath );
+        if (tmplen < longlen)
+        {
+            if (longpath != shortpath) lstrcpyW( longpath, shortpath );
+            return tmplen;
+        }
+        return tmplen + 1;
+    }
+
+    /* check for drive letter */
+    if (shortpath[0] != '/' && shortpath[1] == ':' )
+    {
+        tmplongpath[0] = shortpath[0];
+        tmplongpath[1] = ':';
+        lp = sp = 2;
+    }
+
+    if (wcspbrk( shortpath + sp, wildcardsW ))
+    {
+        SetLastError( ERROR_INVALID_NAME );
+        return 0;
+    }
+
+    while (shortpath[sp])
+    {
+        /* check for path delimiters and reproduce them */
+        if (shortpath[sp] == '\\' || shortpath[sp] == '/')
+        {
+            tmplongpath[lp++] = shortpath[sp++];
+            tmplongpath[lp] = 0; /* terminate string */
+            continue;
+        }
+
+        for (p = shortpath + sp; *p && *p != '/' && *p != '\\'; p++);
+        tmplen = p - (shortpath + sp);
+        lstrcpynW( tmplongpath + lp, shortpath + sp, tmplen + 1 );
+
+        if (tmplongpath[lp] == '.')
+        {
+            if (tmplen == 1 || (tmplen == 2 && tmplongpath[lp + 1] == '.'))
+            {
+                lp += tmplen;
+                sp += tmplen;
+                continue;
+            }
+        }
+
+        /* Check if the file exists */
+        handle = FindFirstFileW( tmplongpath, &wfd );
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            TRACE( "not found %s\n", debugstr_w( tmplongpath ));
+            SetLastError ( ERROR_FILE_NOT_FOUND );
+            return 0;
+        }
+        FindClose( handle );
+
+        /* Use the existing file name if it's a short name */
+        RtlInitUnicodeString( &nameW, tmplongpath + lp );
+        if (RtlIsNameLegalDOS8Dot3( &nameW, NULL, NULL )) lstrcpyW( tmplongpath + lp, wfd.cFileName );
+        lp += lstrlenW( tmplongpath + lp );
+        sp += tmplen;
+    }
+    tmplen = lstrlenW( shortpath ) - 1;
+    if ((shortpath[tmplen] == '/' || shortpath[tmplen] == '\\') &&
+        (tmplongpath[lp - 1] != '/' && tmplongpath[lp - 1] != '\\'))
+        tmplongpath[lp++] = shortpath[tmplen];
+    tmplongpath[lp] = 0;
+
+    tmplen = lstrlenW( tmplongpath ) + 1;
+    if (tmplen <= longlen)
+    {
+        lstrcpyW( longpath, tmplongpath );
+        TRACE("returning %s\n", debugstr_w( longpath ));
+        tmplen--; /* length without 0 */
+    }
+    return tmplen;
+}
+
+
+/***********************************************************************
+ *	GetShortPathNameW   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetShortPathNameW( LPCWSTR longpath, LPWSTR shortpath, DWORD shortlen )
+{
+    static const WCHAR wildcardsW[] = {'*','?',0};
+    WIN32_FIND_DATAW wfd;
+    WCHAR *tmpshortpath;
+    HANDLE handle;
+    LPCWSTR p;
+    DWORD sp = 0, lp = 0, tmplen, buf_len;
+
+    TRACE( "%s,%p,%u\n", debugstr_w(longpath), shortpath, shortlen );
+
+    if (!longpath)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+    if (!longpath[0])
+    {
+        SetLastError( ERROR_BAD_PATHNAME );
+        return 0;
+    }
+
+    /* code below only removes characters from string, never adds, so this is
+     * the largest buffer that tmpshortpath will need to have */
+    buf_len = lstrlenW(longpath) + 1;
+    tmpshortpath = HeapAlloc( GetProcessHeap(), 0, buf_len * sizeof(WCHAR) );
+    if (!tmpshortpath)
+    {
+        SetLastError( ERROR_OUTOFMEMORY );
+        return 0;
+    }
+
+    if (longpath[0] == '\\' && longpath[1] == '\\' && longpath[2] == '?' && longpath[3] == '\\')
+    {
+        memcpy( tmpshortpath, longpath, 4 * sizeof(WCHAR) );
+        sp = lp = 4;
+    }
+
+    if (wcspbrk( longpath + lp, wildcardsW ))
+    {
+        HeapFree( GetProcessHeap(), 0, tmpshortpath );
+        SetLastError( ERROR_INVALID_NAME );
+        return 0;
+    }
+
+    /* check for drive letter */
+    if (longpath[lp] != '/' && longpath[lp + 1] == ':' )
+    {
+        tmpshortpath[sp] = longpath[lp];
+        tmpshortpath[sp + 1] = ':';
+        sp += 2;
+        lp += 2;
+    }
+
+    while (longpath[lp])
+    {
+        /* check for path delimiters and reproduce them */
+        if (longpath[lp] == '\\' || longpath[lp] == '/')
+        {
+            tmpshortpath[sp++] = longpath[lp++];
+            tmpshortpath[sp] = 0; /* terminate string */
+            continue;
+        }
+
+        p = longpath + lp;
+        for (; *p && *p != '/' && *p != '\\'; p++);
+        tmplen = p - (longpath + lp);
+        lstrcpynW( tmpshortpath + sp, longpath + lp, tmplen + 1 );
+
+        if (tmpshortpath[sp] == '.')
+        {
+            if (tmplen == 1 || (tmplen == 2 && tmpshortpath[sp + 1] == '.'))
+            {
+                sp += tmplen;
+                lp += tmplen;
+                continue;
+            }
+        }
+
+        /* Check if the file exists and use the existing short file name */
+        handle = FindFirstFileW( tmpshortpath, &wfd );
+        if (handle == INVALID_HANDLE_VALUE) goto notfound;
+        FindClose( handle );
+
+        /* In rare cases (like "a.abcd") short path may be longer than original path.
+         * Make sure we have enough space in temp buffer. */
+        if (wfd.cAlternateFileName[0] && tmplen < lstrlenW(wfd.cAlternateFileName))
+        {
+            WCHAR *new_buf;
+            buf_len += lstrlenW( wfd.cAlternateFileName ) - tmplen;
+            new_buf = HeapReAlloc( GetProcessHeap(), 0, tmpshortpath, buf_len * sizeof(WCHAR) );
+            if(!new_buf)
+            {
+                HeapFree( GetProcessHeap(), 0, tmpshortpath );
+                SetLastError( ERROR_OUTOFMEMORY );
+                return 0;
+            }
+            tmpshortpath = new_buf;
+        }
+
+        lstrcpyW( tmpshortpath + sp, wfd.cAlternateFileName[0] ? wfd.cAlternateFileName : wfd.cFileName );
+        sp += lstrlenW( tmpshortpath + sp );
+        lp += tmplen;
+    }
+    tmpshortpath[sp] = 0;
+
+    tmplen = lstrlenW( tmpshortpath ) + 1;
+    if (tmplen <= shortlen)
+    {
+        lstrcpyW( shortpath, tmpshortpath );
+        TRACE( "returning %s\n", debugstr_w( shortpath ));
+        tmplen--; /* length without 0 */
+    }
+
+    HeapFree( GetProcessHeap(), 0, tmpshortpath );
+    return tmplen;
+
+ notfound:
+    HeapFree( GetProcessHeap(), 0, tmpshortpath );
+    TRACE( "not found\n" );
+    SetLastError( ERROR_FILE_NOT_FOUND );
+    return 0;
+}
+
+
+/***********************************************************************
  *	GetSystemDirectoryA   (kernelbase.@)
  */
 UINT WINAPI DECLSPEC_HOTPATCH GetSystemDirectoryA( LPSTR path, UINT count )
@@ -684,6 +1109,166 @@ UINT WINAPI DECLSPEC_HOTPATCH GetSystemWindowsDirectoryW( LPWSTR path, UINT coun
 
 
 /***********************************************************************
+ *	GetTempFileNameA   (kernelbase.@)
+ */
+UINT WINAPI DECLSPEC_HOTPATCH GetTempFileNameA( LPCSTR path, LPCSTR prefix, UINT unique, LPSTR buffer )
+{
+    WCHAR *pathW, *prefixW = NULL;
+    WCHAR bufferW[MAX_PATH];
+    UINT ret;
+
+    if (!(pathW = file_name_AtoW( path, FALSE ))) return 0;
+    if (prefix && !(prefixW = file_name_AtoW( prefix, TRUE ))) return 0;
+
+    ret = GetTempFileNameW( pathW, prefixW, unique, bufferW );
+    if (ret) file_name_WtoA( bufferW, -1, buffer, MAX_PATH );
+
+    HeapFree( GetProcessHeap(), 0, prefixW );
+    return ret;
+}
+
+
+/***********************************************************************
+ *	GetTempFileNameW   (kernelbase.@)
+ */
+UINT WINAPI DECLSPEC_HOTPATCH GetTempFileNameW( LPCWSTR path, LPCWSTR prefix, UINT unique, LPWSTR buffer )
+{
+    static const WCHAR formatW[] = {'%','x','.','t','m','p',0};
+    int i;
+    LPWSTR p;
+    DWORD attr;
+
+    if (!path || !buffer)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+
+    /* ensure that the provided directory exists */
+    attr = GetFileAttributesW( path );
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        TRACE( "path not found %s\n", debugstr_w( path ));
+        SetLastError( ERROR_DIRECTORY );
+        return 0;
+    }
+
+    lstrcpyW( buffer, path );
+    p = buffer + lstrlenW(buffer);
+
+    /* add a \, if there isn't one  */
+    if ((p == buffer) || (p[-1] != '\\')) *p++ = '\\';
+
+    if (prefix) for (i = 3; (i > 0) && (*prefix); i--) *p++ = *prefix++;
+
+    unique &= 0xffff;
+    if (unique) swprintf( p, MAX_PATH - (p - buffer), formatW, unique );
+    else
+    {
+        /* get a "random" unique number and try to create the file */
+        HANDLE handle;
+        UINT num = NtGetTickCount() & 0xffff;
+        static UINT last;
+
+        /* avoid using the same name twice in a short interval */
+        if (last - num < 10) num = last + 1;
+        if (!num) num = 1;
+        unique = num;
+        do
+        {
+            swprintf( p, MAX_PATH - (p - buffer), formatW, unique );
+            handle = CreateFileW( buffer, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0 );
+            if (handle != INVALID_HANDLE_VALUE)
+            {  /* We created it */
+                CloseHandle( handle );
+                last = unique;
+                break;
+            }
+            if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_SHARING_VIOLATION)
+                break;  /* No need to go on */
+            if (!(++unique & 0xffff)) unique = 1;
+        } while (unique != num);
+    }
+    TRACE( "returning %s\n", debugstr_w( buffer ));
+    return unique;
+}
+
+
+/***********************************************************************
+ *	GetTempPathA   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetTempPathA( DWORD count, LPSTR path )
+{
+    WCHAR pathW[MAX_PATH];
+    UINT ret;
+
+    if (!(ret = GetTempPathW( MAX_PATH, pathW ))) return 0;
+    if (ret > MAX_PATH)
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    return copy_filename_WtoA( pathW, path, count );
+}
+
+
+/***********************************************************************
+ *	GetTempPathW   (kernelbase.@)
+ */
+DWORD WINAPI DECLSPEC_HOTPATCH GetTempPathW( DWORD count, LPWSTR path )
+{
+    static const WCHAR tmp[]  = { 'T','M','P',0 };
+    static const WCHAR temp[] = { 'T','E','M','P',0 };
+    static const WCHAR userprofile[] = { 'U','S','E','R','P','R','O','F','I','L','E',0 };
+    WCHAR tmp_path[MAX_PATH];
+    UINT ret;
+
+    if (!(ret = GetEnvironmentVariableW( tmp, tmp_path, MAX_PATH )) &&
+        !(ret = GetEnvironmentVariableW( temp, tmp_path, MAX_PATH )) &&
+        !(ret = GetEnvironmentVariableW( userprofile, tmp_path, MAX_PATH )) &&
+        !(ret = GetWindowsDirectoryW( tmp_path, MAX_PATH )))
+        return 0;
+
+    if (ret > MAX_PATH)
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    ret = GetFullPathNameW( tmp_path, MAX_PATH, tmp_path, NULL );
+    if (!ret) return 0;
+
+    if (ret > MAX_PATH - 2)
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    if (tmp_path[ret-1] != '\\')
+    {
+        tmp_path[ret++] = '\\';
+        tmp_path[ret]   = '\0';
+    }
+
+    ret++; /* add space for terminating 0 */
+    if (count >= ret)
+    {
+        lstrcpynW( path, tmp_path, count );
+        /* the remaining buffer must be zeroed up to 32766 bytes in XP or 32767
+         * bytes after it, we will assume the > XP behavior for now */
+        memset( path + ret, 0, (min(count, 32767) - ret) * sizeof(WCHAR) );
+        ret--; /* return length without 0 */
+    }
+    else if (count)
+    {
+        /* the buffer must be cleared if contents will not fit */
+        memset( path, 0, count * sizeof(WCHAR) );
+    }
+
+    TRACE( "returning %u, %s\n", ret, debugstr_w( path ));
+    return ret;
+}
+
+
+/***********************************************************************
  *	GetWindowsDirectoryA   (kernelbase.@)
  */
 UINT WINAPI DECLSPEC_HOTPATCH GetWindowsDirectoryA( LPSTR path, UINT count )
@@ -704,6 +1289,61 @@ UINT WINAPI DECLSPEC_HOTPATCH GetWindowsDirectoryW( LPWSTR path, UINT count )
         len--;
     }
     return len;
+}
+
+
+/***********************************************************************
+ *	NeedCurrentDirectoryForExePathA   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH NeedCurrentDirectoryForExePathA( LPCSTR name )
+{
+    WCHAR *nameW;
+
+    if (!(nameW = file_name_AtoW( name, FALSE ))) return TRUE;
+    return NeedCurrentDirectoryForExePathW( nameW );
+}
+
+
+/***********************************************************************
+ *	NeedCurrentDirectoryForExePathW   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH NeedCurrentDirectoryForExePathW( LPCWSTR name )
+{
+    static const WCHAR env_name[] = {'N','o','D','e','f','a','u','l','t',
+                                     'C','u','r','r','e','n','t',
+                                     'D','i','r','e','c','t','o','r','y',
+                                     'I','n','E','x','e','P','a','t','h',0};
+    WCHAR env_val;
+
+    if (wcschr( name, '\\' )) return TRUE;
+    /* check the existence of the variable, not value */
+    return !GetEnvironmentVariableW( env_name, &env_val, 1 );
+}
+
+
+/***********************************************************************
+ *	SetCurrentDirectoryA   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCurrentDirectoryA( LPCSTR dir )
+{
+    WCHAR *dirW;
+    UNICODE_STRING strW;
+
+    if (!(dirW = file_name_AtoW( dir, FALSE ))) return FALSE;
+    RtlInitUnicodeString( &strW, dirW );
+    return set_ntstatus( RtlSetCurrentDirectory_U( &strW ));
+}
+
+
+/***********************************************************************
+ *	SetCurrentDirectoryW   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCurrentDirectoryW( LPCWSTR dir )
+{
+    UNICODE_STRING dirW;
+
+    RtlInitUnicodeString( &dirW, dir );
+    return set_ntstatus( RtlSetCurrentDirectory_U( &dirW ));
 }
 
 
@@ -894,7 +1534,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileInformationByHandleEx( HANDLE handle, FILE_
     {
     case FileStreamInfo:
     case FileCompressionInfo:
-    case FileAttributeTagInfo:
     case FileRemoteProtocolInfo:
     case FileFullDirectoryInfo:
     case FileFullDirectoryRestartInfo:
@@ -905,6 +1544,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileInformationByHandleEx( HANDLE handle, FILE_
         FIXME( "%p, %u, %p, %u\n", handle, class, info, size );
         SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
         return FALSE;
+
+    case FileAttributeTagInfo:
+        status = NtQueryInformationFile( handle, &io, info, size, FileAttributeTagInformation );
+        break;
 
     case FileBasicInfo:
         status = NtQueryInformationFile( handle, &io, info, size, FileBasicInformation );
@@ -1176,6 +1819,59 @@ HANDLE WINAPI /* DECLSPEC_HOTPATCH */ ReOpenFile( HANDLE handle, DWORD access, D
 {
     FIXME( "(%p, %d, %d, %d): stub\n", handle, access, sharing, flags );
     return INVALID_HANDLE_VALUE;
+}
+
+
+static void WINAPI invoke_completion( void *context, IO_STATUS_BLOCK *io, ULONG res )
+{
+    LPOVERLAPPED_COMPLETION_ROUTINE completion = context;
+    completion( io->u.Status, io->Information, (LPOVERLAPPED)io );
+}
+
+/****************************************************************************
+ *	ReadDirectoryChangesW   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH ReadDirectoryChangesW( HANDLE handle, LPVOID buffer, DWORD len,
+                                                     BOOL subtree, DWORD filter, LPDWORD returned,
+                                                     LPOVERLAPPED overlapped,
+                                                     LPOVERLAPPED_COMPLETION_ROUTINE completion )
+{
+    OVERLAPPED ov, *pov;
+    IO_STATUS_BLOCK *ios;
+    NTSTATUS status;
+    LPVOID cvalue = NULL;
+
+    TRACE( "%p %p %08x %d %08x %p %p %p\n",
+           handle, buffer, len, subtree, filter, returned, overlapped, completion );
+
+    if (!overlapped)
+    {
+        memset( &ov, 0, sizeof ov );
+        ov.hEvent = CreateEventW( NULL, 0, 0, NULL );
+        pov = &ov;
+    }
+    else
+    {
+        pov = overlapped;
+        if (completion) cvalue = completion;
+        else if (((ULONG_PTR)overlapped->hEvent & 1) == 0) cvalue = overlapped;
+    }
+
+    ios = (PIO_STATUS_BLOCK)pov;
+    ios->u.Status = STATUS_PENDING;
+
+    status = NtNotifyChangeDirectoryFile( handle, completion && overlapped ? NULL : pov->hEvent,
+                                          completion && overlapped ? invoke_completion : NULL,
+                                          cvalue, ios, buffer, len, filter, subtree );
+    if (status == STATUS_PENDING)
+    {
+        if (overlapped) return TRUE;
+        WaitForSingleObjectEx( ov.hEvent, INFINITE, TRUE );
+        if (returned) *returned = ios->Information;
+        status = ios->u.Status;
+    }
+    if (!overlapped) CloseHandle( ov.hEvent );
+    return set_ntstatus( status );
 }
 
 
@@ -1629,4 +2325,569 @@ BOOL WINAPI DECLSPEC_HOTPATCH WriteFileGather( HANDLE file, FILE_SEGMENT_ELEMENT
 
     return set_ntstatus( NtWriteFileGather( file, overlapped->hEvent, NULL, cvalue,
                                             io, segments, count, &offset, NULL ));
+}
+
+
+/***********************************************************************
+ * Operations on file times
+ ***********************************************************************/
+
+
+/*********************************************************************
+ *	CompareFileTime   (kernelbase.@)
+ */
+INT WINAPI DECLSPEC_HOTPATCH CompareFileTime( const FILETIME *x, const FILETIME *y )
+{
+    if (!x || !y) return -1;
+    if (x->dwHighDateTime > y->dwHighDateTime) return 1;
+    if (x->dwHighDateTime < y->dwHighDateTime) return -1;
+    if (x->dwLowDateTime > y->dwLowDateTime) return 1;
+    if (x->dwLowDateTime < y->dwLowDateTime) return -1;
+    return 0;
+}
+
+
+/*********************************************************************
+ *	FileTimeToLocalFileTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH FileTimeToLocalFileTime( const FILETIME *utc, FILETIME *local )
+{
+    return set_ntstatus( RtlSystemTimeToLocalTime( (const LARGE_INTEGER *)utc, (LARGE_INTEGER *)local ));
+}
+
+
+/*********************************************************************
+ *	FileTimeToSystemTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH FileTimeToSystemTime( const FILETIME *ft, SYSTEMTIME *systime )
+{
+    TIME_FIELDS tf;
+
+    RtlTimeToTimeFields( (const LARGE_INTEGER *)ft, &tf );
+    systime->wYear = tf.Year;
+    systime->wMonth = tf.Month;
+    systime->wDay = tf.Day;
+    systime->wHour = tf.Hour;
+    systime->wMinute = tf.Minute;
+    systime->wSecond = tf.Second;
+    systime->wMilliseconds = tf.Milliseconds;
+    systime->wDayOfWeek = tf.Weekday;
+    return TRUE;
+}
+
+
+/*********************************************************************
+ *	GetLocalTime   (kernelbase.@)
+ */
+void WINAPI DECLSPEC_HOTPATCH GetLocalTime( SYSTEMTIME *systime )
+{
+    LARGE_INTEGER ft, ft2;
+
+    NtQuerySystemTime( &ft );
+    RtlSystemTimeToLocalTime( &ft, &ft2 );
+    FileTimeToSystemTime( (FILETIME *)&ft2, systime );
+}
+
+
+/*********************************************************************
+ *	GetSystemTime   (kernelbase.@)
+ */
+void WINAPI DECLSPEC_HOTPATCH GetSystemTime( SYSTEMTIME *systime )
+{
+    LARGE_INTEGER ft;
+
+    NtQuerySystemTime( &ft );
+    FileTimeToSystemTime( (FILETIME *)&ft, systime );
+}
+
+
+/***********************************************************************
+ *	GetSystemTimeAsFileTime   (kernelbase.@)
+ */
+void WINAPI DECLSPEC_HOTPATCH GetSystemTimeAsFileTime( FILETIME *time )
+{
+    NtQuerySystemTime( (LARGE_INTEGER *)time );
+}
+
+
+/***********************************************************************
+ *	GetSystemTimePreciseAsFileTime   (kernelbase.@)
+ */
+void WINAPI DECLSPEC_HOTPATCH GetSystemTimePreciseAsFileTime( FILETIME *time )
+{
+    LARGE_INTEGER t;
+
+    t.QuadPart = RtlGetSystemTimePrecise();
+    time->dwLowDateTime = t.u.LowPart;
+    time->dwHighDateTime = t.u.HighPart;
+}
+
+
+/*********************************************************************
+ *	LocalFileTimeToFileTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH LocalFileTimeToFileTime( const FILETIME *local, FILETIME *utc )
+{
+    return set_ntstatus( RtlLocalTimeToSystemTime( (const LARGE_INTEGER *)local, (LARGE_INTEGER *)utc ));
+}
+
+
+/***********************************************************************
+ *	SetLocalTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetLocalTime( const SYSTEMTIME *systime )
+{
+    FILETIME ft;
+    LARGE_INTEGER st;
+
+    if (!SystemTimeToFileTime( systime, &ft )) return FALSE;
+    RtlLocalTimeToSystemTime( (LARGE_INTEGER *)&ft, &st );
+    return set_ntstatus( NtSetSystemTime( &st, NULL ));
+}
+
+
+/***********************************************************************
+ *	SetSystemTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetSystemTime( const SYSTEMTIME *systime )
+{
+    FILETIME ft;
+
+    if (!SystemTimeToFileTime( systime, &ft )) return FALSE;
+    return set_ntstatus( NtSetSystemTime( (LARGE_INTEGER *)&ft, NULL ));
+}
+
+
+/*********************************************************************
+ *	SystemTimeToFileTime   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SystemTimeToFileTime( const SYSTEMTIME *systime, FILETIME *ft )
+{
+    TIME_FIELDS tf;
+
+    tf.Year = systime->wYear;
+    tf.Month = systime->wMonth;
+    tf.Day = systime->wDay;
+    tf.Hour = systime->wHour;
+    tf.Minute = systime->wMinute;
+    tf.Second = systime->wSecond;
+    tf.Milliseconds = systime->wMilliseconds;
+    if (RtlTimeFieldsToTime( &tf, (LARGE_INTEGER *)ft )) return TRUE;
+    SetLastError( ERROR_INVALID_PARAMETER );
+    return FALSE;
+}
+
+
+/***********************************************************************
+ * I/O controls
+ ***********************************************************************/
+
+
+static void dump_dcb( const DCB *dcb )
+{
+    TRACE( "size=%d rate=%d fParity=%d Parity=%d stopbits=%d %sIXON %sIXOFF CTS=%d RTS=%d DSR=%d DTR=%d %sCRTSCTS\n",
+           dcb->ByteSize, dcb->BaudRate, dcb->fParity, dcb->Parity,
+           (dcb->StopBits == ONESTOPBIT) ? 1 : (dcb->StopBits == TWOSTOPBITS) ? 2 : 0,
+           dcb->fOutX ? "" : "~", dcb->fInX ? "" : "~",
+           dcb->fOutxCtsFlow, dcb->fRtsControl, dcb->fOutxDsrFlow, dcb->fDtrControl,
+           (dcb->fOutxCtsFlow || dcb->fRtsControl == RTS_CONTROL_HANDSHAKE) ? "" : "~" );
+}
+
+/*****************************************************************************
+ *	ClearCommBreak   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH ClearCommBreak( HANDLE handle )
+{
+    return EscapeCommFunction( handle, CLRBREAK );
+}
+
+
+/*****************************************************************************
+ *	ClearCommError   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH ClearCommError( HANDLE handle, DWORD *errors, COMSTAT *stat )
+{
+    SERIAL_STATUS ss;
+
+    if (!DeviceIoControl( handle, IOCTL_SERIAL_GET_COMMSTATUS, NULL, 0, &ss, sizeof(ss), NULL, NULL ))
+        return FALSE;
+
+    TRACE( "status %#x,%#x, in %u, out %u, eof %d, wait %d\n", ss.Errors, ss.HoldReasons,
+           ss.AmountInInQueue, ss.AmountInOutQueue, ss.EofReceived, ss.WaitForImmediate );
+
+    if (errors)
+    {
+        *errors = 0;
+        if (ss.Errors & SERIAL_ERROR_BREAK)        *errors |= CE_BREAK;
+        if (ss.Errors & SERIAL_ERROR_FRAMING)      *errors |= CE_FRAME;
+        if (ss.Errors & SERIAL_ERROR_OVERRUN)      *errors |= CE_OVERRUN;
+        if (ss.Errors & SERIAL_ERROR_QUEUEOVERRUN) *errors |= CE_RXOVER;
+        if (ss.Errors & SERIAL_ERROR_PARITY)       *errors |= CE_RXPARITY;
+    }
+    if (stat)
+    {
+        stat->fCtsHold  = !!(ss.HoldReasons & SERIAL_TX_WAITING_FOR_CTS);
+        stat->fDsrHold  = !!(ss.HoldReasons & SERIAL_TX_WAITING_FOR_DSR);
+        stat->fRlsdHold = !!(ss.HoldReasons & SERIAL_TX_WAITING_FOR_DCD);
+        stat->fXoffHold = !!(ss.HoldReasons & SERIAL_TX_WAITING_FOR_XON);
+        stat->fXoffSent = !!(ss.HoldReasons & SERIAL_TX_WAITING_XOFF_SENT);
+        stat->fEof      = !!ss.EofReceived;
+        stat->fTxim     = !!ss.WaitForImmediate;
+        stat->cbInQue   = ss.AmountInInQueue;
+        stat->cbOutQue  = ss.AmountInOutQueue;
+    }
+    return TRUE;
+}
+
+
+/****************************************************************************
+ *	DeviceIoControl   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH DeviceIoControl( HANDLE handle, DWORD code, void *in_buff, DWORD in_count,
+                                               void *out_buff, DWORD out_count, DWORD *returned,
+                                               OVERLAPPED *overlapped )
+{
+    IO_STATUS_BLOCK iosb, *piosb = &iosb;
+    void *cvalue = NULL;
+    HANDLE event = 0;
+    NTSTATUS status;
+
+    TRACE( "(%p,%x,%p,%d,%p,%d,%p,%p)\n",
+           handle, code, in_buff, in_count, out_buff, out_count, returned, overlapped );
+
+    if (overlapped)
+    {
+        piosb = (IO_STATUS_BLOCK *)overlapped;
+        if (!((ULONG_PTR)overlapped->hEvent & 1)) cvalue = overlapped;
+        event = overlapped->hEvent;
+        overlapped->Internal = STATUS_PENDING;
+        overlapped->InternalHigh = 0;
+    }
+
+    if (HIWORD(code) == FILE_DEVICE_FILE_SYSTEM)
+        status = NtFsControlFile( handle, event, NULL, cvalue, piosb, code,
+                                  in_buff, in_count, out_buff, out_count );
+    else
+        status = NtDeviceIoControlFile( handle, event, NULL, cvalue, piosb, code,
+                                        in_buff, in_count, out_buff, out_count );
+
+    if (returned) *returned = piosb->Information;
+    return set_ntstatus( status );
+}
+
+
+/*****************************************************************************
+ *	EscapeCommFunction   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH EscapeCommFunction( HANDLE handle, DWORD func )
+{
+    static const DWORD ioctls[] =
+    {
+        0,
+        IOCTL_SERIAL_SET_XOFF,      /* SETXOFF */
+        IOCTL_SERIAL_SET_XON,       /* SETXON */
+        IOCTL_SERIAL_SET_RTS,       /* SETRTS */
+        IOCTL_SERIAL_CLR_RTS,       /* CLRRTS */
+        IOCTL_SERIAL_SET_DTR,       /* SETDTR */
+        IOCTL_SERIAL_CLR_DTR,       /* CLRDTR */
+        IOCTL_SERIAL_RESET_DEVICE,  /* RESETDEV */
+        IOCTL_SERIAL_SET_BREAK_ON,  /* SETBREAK */
+        IOCTL_SERIAL_SET_BREAK_OFF  /* CLRBREAK */
+    };
+
+    if (func >= ARRAY_SIZE(ioctls) || !ioctls[func])
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    return DeviceIoControl( handle, ioctls[func], NULL, 0, NULL, 0, NULL, NULL );
+}
+
+
+/***********************************************************************
+ *	GetCommConfig   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommConfig( HANDLE handle, COMMCONFIG *config, DWORD *size )
+{
+    if (!config) return FALSE;
+
+    TRACE( "(%p, %p, %p %u)\n", handle, config, size, *size );
+
+    if (*size < sizeof(COMMCONFIG))
+    {
+        *size = sizeof(COMMCONFIG);
+        return FALSE;
+    }
+    *size = sizeof(COMMCONFIG);
+    config->dwSize = sizeof(COMMCONFIG);
+    config->wVersion = 1;
+    config->wReserved = 0;
+    config->dwProviderSubType = PST_RS232;
+    config->dwProviderOffset = 0;
+    config->dwProviderSize = 0;
+    return GetCommState( handle, &config->dcb );
+}
+
+
+/*****************************************************************************
+ *	GetCommMask   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommMask( HANDLE handle, DWORD *mask )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_GET_WAIT_MASK, NULL, 0, mask, sizeof(*mask),
+                            NULL, NULL );
+}
+
+
+/***********************************************************************
+ *	GetCommModemStatus   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommModemStatus( HANDLE handle, DWORD *status )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_GET_MODEMSTATUS, NULL, 0, status, sizeof(*status),
+                            NULL, NULL );
+}
+
+
+/***********************************************************************
+ *	GetCommProperties   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommProperties( HANDLE handle, COMMPROP *prop )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_GET_PROPERTIES, NULL, 0, prop, sizeof(*prop), NULL, NULL );
+}
+
+
+/*****************************************************************************
+ *	GetCommState   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommState( HANDLE handle, DCB *dcb )
+{
+    SERIAL_BAUD_RATE sbr;
+    SERIAL_LINE_CONTROL slc;
+    SERIAL_HANDFLOW shf;
+    SERIAL_CHARS sc;
+
+    if (!dcb)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (!DeviceIoControl(handle, IOCTL_SERIAL_GET_BAUD_RATE, NULL, 0, &sbr, sizeof(sbr), NULL, NULL) ||
+        !DeviceIoControl(handle, IOCTL_SERIAL_GET_LINE_CONTROL, NULL, 0, &slc, sizeof(slc), NULL, NULL) ||
+        !DeviceIoControl(handle, IOCTL_SERIAL_GET_HANDFLOW, NULL, 0, &shf, sizeof(shf), NULL, NULL) ||
+        !DeviceIoControl(handle, IOCTL_SERIAL_GET_CHARS, NULL, 0, &sc, sizeof(sc), NULL, NULL))
+        return FALSE;
+
+    dcb->DCBlength         = sizeof(*dcb);
+    dcb->BaudRate          = sbr.BaudRate;
+    /* yes, they seem no never be (re)set on NT */
+    dcb->fBinary           = 1;
+    dcb->fParity           = 0;
+    dcb->fOutxCtsFlow      = !!(shf.ControlHandShake & SERIAL_CTS_HANDSHAKE);
+    dcb->fOutxDsrFlow      = !!(shf.ControlHandShake & SERIAL_DSR_HANDSHAKE);
+    dcb->fDsrSensitivity   = !!(shf.ControlHandShake & SERIAL_DSR_SENSITIVITY);
+    dcb->fTXContinueOnXoff = !!(shf.FlowReplace & SERIAL_XOFF_CONTINUE);
+    dcb->fOutX             = !!(shf.FlowReplace & SERIAL_AUTO_TRANSMIT);
+    dcb->fInX              = !!(shf.FlowReplace & SERIAL_AUTO_RECEIVE);
+    dcb->fErrorChar        = !!(shf.FlowReplace & SERIAL_ERROR_CHAR);
+    dcb->fNull             = !!(shf.FlowReplace & SERIAL_NULL_STRIPPING);
+    dcb->fAbortOnError     = !!(shf.ControlHandShake & SERIAL_ERROR_ABORT);
+    dcb->XonLim            = shf.XonLimit;
+    dcb->XoffLim           = shf.XoffLimit;
+    dcb->ByteSize          = slc.WordLength;
+    dcb->Parity            = slc.Parity;
+    dcb->StopBits          = slc.StopBits;
+    dcb->XonChar           = sc.XonChar;
+    dcb->XoffChar          = sc.XoffChar;
+    dcb->ErrorChar         = sc.ErrorChar;
+    dcb->EofChar           = sc.EofChar;
+    dcb->EvtChar           = sc.EventChar;
+
+    switch (shf.ControlHandShake & (SERIAL_DTR_CONTROL | SERIAL_DTR_HANDSHAKE))
+    {
+    case SERIAL_DTR_CONTROL:    dcb->fDtrControl = DTR_CONTROL_ENABLE; break;
+    case SERIAL_DTR_HANDSHAKE:  dcb->fDtrControl = DTR_CONTROL_HANDSHAKE; break;
+    default:                    dcb->fDtrControl = DTR_CONTROL_DISABLE; break;
+    }
+    switch (shf.FlowReplace & (SERIAL_RTS_CONTROL | SERIAL_RTS_HANDSHAKE))
+    {
+    case SERIAL_RTS_CONTROL:    dcb->fRtsControl = RTS_CONTROL_ENABLE; break;
+    case SERIAL_RTS_HANDSHAKE:  dcb->fRtsControl = RTS_CONTROL_HANDSHAKE; break;
+    case SERIAL_RTS_CONTROL | SERIAL_RTS_HANDSHAKE:
+                                dcb->fRtsControl = RTS_CONTROL_TOGGLE; break;
+    default:                    dcb->fRtsControl = RTS_CONTROL_DISABLE; break;
+    }
+    dump_dcb( dcb );
+    return TRUE;
+}
+
+
+/*****************************************************************************
+ *	GetCommTimeouts   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH GetCommTimeouts( HANDLE handle, COMMTIMEOUTS *timeouts )
+{
+    if (!timeouts)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    return DeviceIoControl( handle, IOCTL_SERIAL_GET_TIMEOUTS, NULL, 0, timeouts, sizeof(*timeouts),
+                            NULL, NULL );
+}
+
+/********************************************************************
+ *	PurgeComm   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH PurgeComm(HANDLE handle, DWORD flags)
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_PURGE, &flags, sizeof(flags),
+                            NULL, 0, NULL, NULL );
+}
+
+
+/*****************************************************************************
+ *	SetCommBreak   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCommBreak( HANDLE handle )
+{
+    return EscapeCommFunction( handle, SETBREAK );
+}
+
+
+/***********************************************************************
+ *	SetCommConfig   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCommConfig( HANDLE handle, COMMCONFIG *config, DWORD size )
+{
+    TRACE( "(%p, %p, %u)\n", handle, config, size );
+    return SetCommState( handle, &config->dcb );
+}
+
+
+/*****************************************************************************
+ *	SetCommMask   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCommMask( HANDLE handle, DWORD mask )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_SET_WAIT_MASK, &mask, sizeof(mask),
+                            NULL, 0, NULL, NULL );
+}
+
+
+/*****************************************************************************
+ *	SetCommState   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCommState( HANDLE handle, DCB *dcb )
+{
+    SERIAL_BAUD_RATE sbr;
+    SERIAL_LINE_CONTROL slc;
+    SERIAL_HANDFLOW shf;
+    SERIAL_CHARS sc;
+
+    if (!dcb)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    dump_dcb( dcb );
+
+    sbr.BaudRate   = dcb->BaudRate;
+    slc.StopBits   = dcb->StopBits;
+    slc.Parity     = dcb->Parity;
+    slc.WordLength = dcb->ByteSize;
+    shf.ControlHandShake = 0;
+    shf.FlowReplace = 0;
+    if (dcb->fOutxCtsFlow) shf.ControlHandShake |= SERIAL_CTS_HANDSHAKE;
+    if (dcb->fOutxDsrFlow) shf.ControlHandShake |= SERIAL_DSR_HANDSHAKE;
+    switch (dcb->fDtrControl)
+    {
+    case DTR_CONTROL_DISABLE:   break;
+    case DTR_CONTROL_ENABLE:    shf.ControlHandShake |= SERIAL_DTR_CONTROL; break;
+    case DTR_CONTROL_HANDSHAKE: shf.ControlHandShake |= SERIAL_DTR_HANDSHAKE; break;
+    default:
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    switch (dcb->fRtsControl)
+    {
+    case RTS_CONTROL_DISABLE:   break;
+    case RTS_CONTROL_ENABLE:    shf.FlowReplace |= SERIAL_RTS_CONTROL; break;
+    case RTS_CONTROL_HANDSHAKE: shf.FlowReplace |= SERIAL_RTS_HANDSHAKE; break;
+    case RTS_CONTROL_TOGGLE:    shf.FlowReplace |= SERIAL_RTS_CONTROL | SERIAL_RTS_HANDSHAKE; break;
+    default:
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (dcb->fDsrSensitivity)   shf.ControlHandShake |= SERIAL_DSR_SENSITIVITY;
+    if (dcb->fAbortOnError)     shf.ControlHandShake |= SERIAL_ERROR_ABORT;
+    if (dcb->fErrorChar)        shf.FlowReplace |= SERIAL_ERROR_CHAR;
+    if (dcb->fNull)             shf.FlowReplace |= SERIAL_NULL_STRIPPING;
+    if (dcb->fTXContinueOnXoff) shf.FlowReplace |= SERIAL_XOFF_CONTINUE;
+    if (dcb->fOutX)             shf.FlowReplace |= SERIAL_AUTO_TRANSMIT;
+    if (dcb->fInX)              shf.FlowReplace |= SERIAL_AUTO_RECEIVE;
+    shf.XonLimit  = dcb->XonLim;
+    shf.XoffLimit = dcb->XoffLim;
+    sc.EofChar    = dcb->EofChar;
+    sc.ErrorChar  = dcb->ErrorChar;
+    sc.BreakChar  = 0;
+    sc.EventChar  = dcb->EvtChar;
+    sc.XonChar    = dcb->XonChar;
+    sc.XoffChar   = dcb->XoffChar;
+
+    /* note: change DTR/RTS lines after setting the comm attributes,
+     * so flow control does not interfere.
+     */
+    return (DeviceIoControl( handle, IOCTL_SERIAL_SET_BAUD_RATE, &sbr, sizeof(sbr), NULL, 0, NULL, NULL ) &&
+            DeviceIoControl( handle, IOCTL_SERIAL_SET_LINE_CONTROL, &slc, sizeof(slc), NULL, 0, NULL, NULL ) &&
+            DeviceIoControl( handle, IOCTL_SERIAL_SET_HANDFLOW, &shf, sizeof(shf), NULL, 0, NULL, NULL ) &&
+            DeviceIoControl( handle, IOCTL_SERIAL_SET_CHARS, &sc, sizeof(sc), NULL, 0, NULL, NULL ));
+}
+
+
+/*****************************************************************************
+ *	SetCommTimeouts   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetCommTimeouts( HANDLE handle, COMMTIMEOUTS *timeouts )
+{
+    if (!timeouts)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    return DeviceIoControl( handle, IOCTL_SERIAL_SET_TIMEOUTS, timeouts, sizeof(*timeouts),
+                            NULL, 0, NULL, NULL );
+}
+
+
+/*****************************************************************************
+ *      SetupComm   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetupComm( HANDLE handle, DWORD in_size, DWORD out_size )
+{
+    SERIAL_QUEUE_SIZE sqs;
+
+    sqs.InSize = in_size;
+    sqs.OutSize = out_size;
+    return DeviceIoControl( handle, IOCTL_SERIAL_SET_QUEUE_SIZE, &sqs, sizeof(sqs), NULL, 0, NULL, NULL );
+}
+
+
+/*****************************************************************************
+ *	TransmitCommChar   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH TransmitCommChar( HANDLE handle, CHAR ch )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_IMMEDIATE_CHAR, &ch, sizeof(ch), NULL, 0, NULL, NULL );
+}
+
+
+/***********************************************************************
+ *	WaitCommEvent   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH WaitCommEvent( HANDLE handle, DWORD *events, OVERLAPPED *overlapped )
+{
+    return DeviceIoControl( handle, IOCTL_SERIAL_WAIT_ON_MASK, NULL, 0, events, sizeof(*events),
+                            NULL, overlapped );
 }

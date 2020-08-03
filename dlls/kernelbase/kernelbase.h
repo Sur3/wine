@@ -26,6 +26,7 @@
 
 extern WCHAR *file_name_AtoW( LPCSTR name, BOOL alloc ) DECLSPEC_HIDDEN;
 extern DWORD file_name_WtoA( LPCWSTR src, INT srclen, LPSTR dest, INT destlen ) DECLSPEC_HIDDEN;
+extern void init_startup_info( RTL_USER_PROCESS_PARAMETERS *params ) DECLSPEC_HIDDEN;
 
 extern const WCHAR windows_dir[] DECLSPEC_HIDDEN;
 extern const WCHAR system_dir[] DECLSPEC_HIDDEN;
@@ -33,6 +34,12 @@ extern const WCHAR system_dir[] DECLSPEC_HIDDEN;
 static inline BOOL is_console_handle(HANDLE h)
 {
     return h != INVALID_HANDLE_VALUE && ((UINT_PTR)h & 3) == 3;
+}
+
+/* map between ntdll handle and kernel32 console handle */
+static inline HANDLE console_handle_map( HANDLE h )
+{
+    return h != INVALID_HANDLE_VALUE ? (HANDLE)((UINT_PTR)h ^ 3) : INVALID_HANDLE_VALUE;
 }
 
 static inline BOOL set_ntstatus( NTSTATUS status )

@@ -42,6 +42,24 @@ WINE_DEFAULT_DEBUG_CHANNEL(module);
  ***********************************************************************/
 
 
+/***********************************************************************
+ *	DelayLoadFailureHook   (kernelbase.@)
+ */
+FARPROC WINAPI DECLSPEC_HOTPATCH DelayLoadFailureHook( LPCSTR name, LPCSTR function )
+{
+    ULONG_PTR args[2];
+
+    if ((ULONG_PTR)function >> 16)
+        ERR( "failed to delay load %s.%s\n", name, function );
+    else
+        ERR( "failed to delay load %s.%u\n", name, LOWORD(function) );
+    args[0] = (ULONG_PTR)name;
+    args[1] = (ULONG_PTR)function;
+    RaiseException( EXCEPTION_WINE_STUB, EH_NONCONTINUABLE, 2, args );
+    return NULL;
+}
+
+
 /****************************************************************************
  *	DisableThreadLibraryCalls   (kernelbase.@)
  */
@@ -555,7 +573,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExA( HMODULE module, ENUMRESTYPEP
     BOOL ret = FALSE;
     LPSTR type = NULL;
     DWORD len = 0, newlen;
-    NTSTATUS status;
     const IMAGE_RESOURCE_DIRECTORY *resdir;
     const IMAGE_RESOURCE_DIRECTORY_ENTRY *et;
     const IMAGE_RESOURCE_DIR_STRING_U *str;
@@ -570,11 +587,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExA( HMODULE module, ENUMRESTYPEP
 
     if (!module) module = GetModuleHandleW( 0 );
 
-    if ((status = LdrFindResourceDirectory_U( module, NULL, 0, &resdir )) != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return FALSE;
-    }
+    if (!set_ntstatus( LdrFindResourceDirectory_U( module, NULL, 0, &resdir ))) return FALSE;
+
     et = (const IMAGE_RESOURCE_DIRECTORY_ENTRY *)(resdir + 1);
     for (i = 0; i < resdir->NumberOfNamedEntries+resdir->NumberOfIdEntries; i++)
     {
@@ -612,7 +626,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExW( HMODULE module, ENUMRESTYPEP
     int i, len = 0;
     BOOL ret = FALSE;
     LPWSTR type = NULL;
-    NTSTATUS status;
     const IMAGE_RESOURCE_DIRECTORY *resdir;
     const IMAGE_RESOURCE_DIRECTORY_ENTRY *et;
     const IMAGE_RESOURCE_DIR_STRING_U *str;
@@ -624,11 +637,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExW( HMODULE module, ENUMRESTYPEP
 
     if (!module) module = GetModuleHandleW( 0 );
 
-    if ((status = LdrFindResourceDirectory_U( module, NULL, 0, &resdir )) != STATUS_SUCCESS)
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return FALSE;
-    }
+    if (!set_ntstatus( LdrFindResourceDirectory_U( module, NULL, 0, &resdir ))) return FALSE;
+
     et = (const IMAGE_RESOURCE_DIRECTORY_ENTRY *)(resdir + 1);
     for (i = 0; i < resdir->NumberOfNamedEntries + resdir->NumberOfIdEntries; i++)
     {
@@ -717,15 +727,14 @@ BOOL WINAPI DECLSPEC_HOTPATCH FreeResource( HGLOBAL handle )
  */
 HGLOBAL WINAPI DECLSPEC_HOTPATCH LoadResource( HINSTANCE module, HRSRC rsrc )
 {
-    NTSTATUS status;
-    void *ret = NULL;
+    void *ret;
 
     TRACE( "%p %p\n", module, rsrc );
 
     if (!rsrc) return 0;
     if (!module) module = GetModuleHandleW( 0 );
-    status = LdrAccessResource( module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL );
-    if (status != STATUS_SUCCESS) SetLastError( RtlNtStatusToDosError(status) );
+    if (!set_ntstatus( LdrAccessResource( module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL )))
+        return 0;
     return ret;
 }
 
@@ -777,16 +786,11 @@ void WINAPI DECLSPEC_HOTPATCH AddRefActCtx( HANDLE context )
  */
 HANDLE WINAPI DECLSPEC_HOTPATCH CreateActCtxW( PCACTCTXW ctx )
 {
-    NTSTATUS status;
     HANDLE context;
 
     TRACE( "%p %08x\n", ctx, ctx ? ctx->dwFlags : 0 );
 
-    if ((status = RtlCreateActivationContext( &context, ctx )))
-    {
-        SetLastError( RtlNtStatusToDosError(status) );
-        return INVALID_HANDLE_VALUE;
-    }
+    if (!set_ntstatus( RtlCreateActivationContext( &context, ctx ))) return INVALID_HANDLE_VALUE;
     return context;
 }
 

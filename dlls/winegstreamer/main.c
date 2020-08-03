@@ -46,6 +46,12 @@ static const WCHAR wGstreamer_Mp3[] =
 {'G','S','t','r','e','a','m','e','r',' ','M','p','3',' ','f','i','l','t','e','r',0};
 static const WCHAR wGstreamer_AudioConvert[] =
 {'G','S','t','r','e','a','m','e','r',' ','A','u','d','i','o','C','o','n','v','e','r','t',' ','f','i','l','t','e','r',0};
+static const WCHAR wave_parserW[] =
+{'W','a','v','e',' ','P','a','r','s','e','r',0};
+static const WCHAR avi_splitterW[] =
+{'A','V','I',' ','S','p','l','i','t','t','e','r',0};
+static const WCHAR mpeg_splitterW[] =
+{'M','P','E','G','-','I',' ','S','t','r','e','a','m',' ','S','p','l','i','t','t','e','r',0};
 
 static WCHAR wNull[] = {'\0'};
 
@@ -180,6 +186,138 @@ AMOVIESETUP_FILTER const amfAudioConvert =
     amfAudioConvertPin
 };
 
+static const AMOVIESETUP_MEDIATYPE wave_parser_sink_type_data[] =
+{
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_WAVE},
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_AU},
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_AIFF},
+};
+
+static const AMOVIESETUP_MEDIATYPE wave_parser_source_type_data[] =
+{
+    {&MEDIATYPE_Audio, &GUID_NULL},
+};
+
+static const AMOVIESETUP_PIN wave_parser_pin_data[] =
+{
+    {
+        NULL,
+        FALSE, FALSE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(wave_parser_sink_type_data),
+        wave_parser_sink_type_data,
+    },
+    {
+        NULL,
+        FALSE, TRUE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(wave_parser_source_type_data),
+        wave_parser_source_type_data,
+    },
+};
+
+static const AMOVIESETUP_FILTER wave_parser_filter_data =
+{
+    &CLSID_WAVEParser,
+    wave_parserW,
+    MERIT_UNLIKELY,
+    ARRAY_SIZE(wave_parser_pin_data),
+    wave_parser_pin_data,
+};
+
+static const AMOVIESETUP_MEDIATYPE avi_splitter_sink_type_data[] =
+{
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_Avi},
+};
+
+static const AMOVIESETUP_PIN avi_splitter_pin_data[] =
+{
+    {
+        NULL,
+        FALSE, FALSE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(avi_splitter_sink_type_data),
+        avi_splitter_sink_type_data,
+    },
+    {
+        NULL,
+        FALSE, TRUE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(amfMTvideo),
+        amfMTvideo,
+    },
+};
+
+static const AMOVIESETUP_FILTER avi_splitter_filter_data =
+{
+    &CLSID_AviSplitter,
+    avi_splitterW,
+    0x5ffff0,
+    ARRAY_SIZE(avi_splitter_pin_data),
+    avi_splitter_pin_data,
+};
+
+static const AMOVIESETUP_MEDIATYPE mpeg_splitter_sink_type_data[] =
+{
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_MPEG1Audio},
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_MPEG1Video},
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_MPEG1System},
+    {&MEDIATYPE_Stream, &MEDIASUBTYPE_MPEG1VideoCD},
+};
+
+static const AMOVIESETUP_MEDIATYPE mpeg_splitter_audio_type_data[] =
+{
+    {&MEDIATYPE_Audio, &MEDIASUBTYPE_MPEG1Packet},
+    {&MEDIATYPE_Audio, &MEDIASUBTYPE_MPEG1AudioPayload},
+};
+
+static const AMOVIESETUP_MEDIATYPE mpeg_splitter_video_type_data[] =
+{
+    {&MEDIATYPE_Video, &MEDIASUBTYPE_MPEG1Packet},
+    {&MEDIATYPE_Video, &MEDIASUBTYPE_MPEG1Payload},
+};
+
+static const AMOVIESETUP_PIN mpeg_splitter_pin_data[] =
+{
+    {
+        NULL,
+        FALSE, FALSE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(mpeg_splitter_sink_type_data),
+        mpeg_splitter_sink_type_data,
+    },
+    {
+        NULL,
+        FALSE, TRUE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(mpeg_splitter_audio_type_data),
+        mpeg_splitter_audio_type_data,
+    },
+    {
+        NULL,
+        FALSE, TRUE, FALSE, FALSE,
+        &GUID_NULL,
+        NULL,
+        ARRAY_SIZE(mpeg_splitter_video_type_data),
+        mpeg_splitter_video_type_data,
+    },
+};
+
+static const AMOVIESETUP_FILTER mpeg_splitter_filter_data =
+{
+    &CLSID_MPEG1Splitter,
+    mpeg_splitterW,
+    0x5ffff0,
+    ARRAY_SIZE(mpeg_splitter_pin_data),
+    mpeg_splitter_pin_data,
+};
+
 FactoryTemplate const g_Templates[] = {
     {
         wGstreamer_Splitter,
@@ -215,6 +353,27 @@ FactoryTemplate const g_Templates[] = {
         Gstreamer_AudioConvert_create,
         NULL,
         &amfAudioConvert,
+    },
+    {
+        wave_parserW,
+        &CLSID_WAVEParser,
+        wave_parser_create,
+        NULL,
+        &wave_parser_filter_data,
+    },
+    {
+        avi_splitterW,
+        &CLSID_AviSplitter,
+        avi_splitter_create,
+        NULL,
+        &avi_splitter_filter_data,
+    },
+    {
+        mpeg_splitterW,
+        &CLSID_MPEG1Splitter,
+        mpeg_splitter_create,
+        NULL,
+        &mpeg_splitter_filter_data,
     },
 };
 

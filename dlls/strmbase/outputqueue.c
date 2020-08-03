@@ -48,15 +48,9 @@ static void OutputQueue_FreeSamples(OutputQueue *pOutputQueue)
     }
 }
 
-HRESULT WINAPI OutputQueue_Construct(
-    BaseOutputPin *pInputPin,
-    BOOL bAuto,
-    BOOL bQueue,
-    LONG lBatchSize,
-    BOOL bBatchExact,
-    DWORD dwPriority,
-    const OutputQueueFuncTable* pFuncsTable,
-    OutputQueue **ppOutputQueue )
+HRESULT WINAPI OutputQueue_Construct(struct strmbase_source *pInputPin, BOOL bAuto,
+        BOOL bQueue, LONG lBatchSize, BOOL bBatchExact, DWORD dwPriority,
+        const OutputQueueFuncTable *pFuncsTable, OutputQueue **ppOutputQueue)
 
 {
     BOOL threaded = FALSE;
@@ -124,7 +118,7 @@ HRESULT WINAPI OutputQueue_ReceiveMultiple(OutputQueue *pOutputQueue, IMediaSamp
     HRESULT hr = S_OK;
     int i;
 
-    if (!pOutputQueue->pInputPin->pin.pConnectedTo || !pOutputQueue->pInputPin->pMemInputPin)
+    if (!pOutputQueue->pInputPin->pin.peer || !pOutputQueue->pInputPin->pMemInputPin)
         return VFW_E_NOT_CONNECTED;
 
     if (!pOutputQueue->hThread)
@@ -247,7 +241,7 @@ DWORD WINAPI OutputQueueImpl_ThreadProc(OutputQueue *pOutputQueue)
                     HeapFree(GetProcessHeap(),0,qev);
                 }
 
-                if (pOutputQueue->pInputPin->pin.pConnectedTo && pOutputQueue->pInputPin->pMemInputPin)
+                if (pOutputQueue->pInputPin->pin.peer && pOutputQueue->pInputPin->pMemInputPin)
                 {
                     IMemInputPin_AddRef(pOutputQueue->pInputPin->pMemInputPin);
                     LeaveCriticalSection(&pOutputQueue->csQueue);

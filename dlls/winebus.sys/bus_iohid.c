@@ -409,12 +409,17 @@ NTSTATUS iohid_driver_init(void)
         return STATUS_UNSUCCESSFUL;
     }
 
+    TRACE("Initialization successful\n");
     return STATUS_SUCCESS;
 }
 
 void iohid_driver_unload( void )
 {
     TRACE("Unloading Driver\n");
+
+    if (!run_loop_handle)
+        return;
+
     IOHIDManagerUnscheduleFromRunLoop(hid_manager, run_loop, kCFRunLoopDefaultMode);
     CFRunLoopStop(run_loop);
     WaitForSingleObject(run_loop_handle, INFINITE);
@@ -429,7 +434,6 @@ void iohid_driver_unload( void )
 
 NTSTATUS iohid_driver_init(void)
 {
-    WARN("IOHID Support not compiled into Wine.\n");
     return STATUS_NOT_IMPLEMENTED;
 }
 

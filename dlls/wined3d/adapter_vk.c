@@ -472,7 +472,7 @@ static void adapter_vk_uninit_3d(struct wined3d_device *device)
 }
 
 static void *adapter_vk_map_bo_address(struct wined3d_context *context,
-        const struct wined3d_bo_address *data, size_t size, GLenum binding, uint32_t flags)
+        const struct wined3d_bo_address *data, size_t size, uint32_t bind_flags, uint32_t map_flags)
 {
     if (data->buffer_object)
     {
@@ -483,11 +483,29 @@ static void *adapter_vk_map_bo_address(struct wined3d_context *context,
     return data->addr;
 }
 
-static void adapter_vk_unmap_bo_address(struct wined3d_context *context,
-        const struct wined3d_bo_address *data, GLenum binding)
+static void adapter_vk_unmap_bo_address(struct wined3d_context *context, const struct wined3d_bo_address *data,
+        uint32_t bind_flags, unsigned int range_count, const struct wined3d_map_range *ranges)
 {
     if (data->buffer_object)
         ERR("Unsupported buffer object %#lx.\n", data->buffer_object);
+}
+
+static void adapter_vk_copy_bo_address(struct wined3d_context *context,
+        const struct wined3d_bo_address *dst, uint32_t dst_bind_flags,
+        const struct wined3d_bo_address *src, uint32_t src_bind_flags, size_t size)
+{
+    struct wined3d_map_range range;
+    void *dst_ptr, *src_ptr;
+
+    src_ptr = adapter_vk_map_bo_address(context, src, size, src_bind_flags, WINED3D_MAP_READ);
+    dst_ptr = adapter_vk_map_bo_address(context, dst, size, dst_bind_flags, WINED3D_MAP_WRITE);
+
+    memcpy(dst_ptr, src_ptr, size);
+
+    range.offset = 0;
+    range.size = size;
+    adapter_vk_unmap_bo_address(context, dst, dst_bind_flags, 1, &range);
+    adapter_vk_unmap_bo_address(context, src, src_bind_flags, 0, NULL);
 }
 
 static HRESULT adapter_vk_create_swapchain(struct wined3d_device *device, struct wined3d_swapchain_desc *desc,
@@ -802,6 +820,12 @@ static void adapter_vk_flush_context(struct wined3d_context *context)
     TRACE("context %p.\n", context);
 }
 
+void adapter_vk_clear_uav(struct wined3d_context *context,
+        struct wined3d_unordered_access_view *view, const struct wined3d_uvec4 *clear_value)
+{
+    FIXME("context %p, view %p, clear_value %s.\n", context, view, debug_uvec4(clear_value));
+}
+
 static const struct wined3d_adapter_ops wined3d_adapter_vk_ops =
 {
     adapter_vk_destroy,
@@ -815,6 +839,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_vk_ops =
     adapter_vk_uninit_3d,
     adapter_vk_map_bo_address,
     adapter_vk_unmap_bo_address,
+    adapter_vk_copy_bo_address,
     adapter_vk_create_swapchain,
     adapter_vk_destroy_swapchain,
     adapter_vk_create_buffer,
@@ -832,6 +857,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_vk_ops =
     adapter_vk_create_query,
     adapter_vk_destroy_query,
     adapter_vk_flush_context,
+    adapter_vk_clear_uav,
 };
 
 static unsigned int wined3d_get_wine_vk_version(void)
@@ -1105,6 +1131,17 @@ static void adapter_vk_init_driver_info(struct wined3d_adapter *adapter,
     wined3d_driver_info_init(&adapter->driver_info, gpu_description, vram_bytes, sysmem_bytes);
 }
 
+static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter *adapter, uint32_t wined3d_creation_flags)
+{
+    struct wined3d_d3d_info *d3d_info = &adapter->d3d_info;
+
+    d3d_info->wined3d_creation_flags = wined3d_creation_flags;
+
+    d3d_info->texture_swizzle = TRUE;
+
+    d3d_info->multisample_draw_location = WINED3D_LOCATION_TEXTURE_RGB;
+}
+
 static BOOL wined3d_adapter_vk_init(struct wined3d_adapter_vk *adapter_vk,
         unsigned int ordinal, unsigned int wined3d_creation_flags)
 {
@@ -1156,8 +1193,7 @@ static BOOL wined3d_adapter_vk_init(struct wined3d_adapter_vk *adapter_vk,
     adapter->fragment_pipe = &none_fragment_pipe;
     adapter->shader_backend = &none_shader_backend;
 
-    adapter->d3d_info.wined3d_creation_flags = wined3d_creation_flags;
-    adapter->d3d_info.texture_swizzle = TRUE;
+    wined3d_adapter_vk_init_d3d_info(adapter, wined3d_creation_flags);
 
     return TRUE;
 
